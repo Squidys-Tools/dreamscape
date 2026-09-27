@@ -1,0 +1,60 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "scripts": [
+    {
+      "name": "Check everything",
+      "command": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo test -p canvas-core",
+      "icon": "test"
+    },
+    {
+      "name": "Format",
+      "command": "cargo fmt --all",
+      "icon": "configure"
+    },
+    {
+      "name": "Typecheck",
+      "command": "cargo check --workspace --all-targets",
+      "icon": "lint"
+    },
+    {
+      "name": "Clippy",
+      "command": "cargo clippy --workspace --all-targets",
+      "icon": "lint"
+    },
+    {
+      "name": "Unit tests",
+      "command": "cargo test -p canvas-core",
+      "icon": "test"
+    },
+    {
+      "name": "Bench 2k/8k/20k",
+      "command": ".\\scripts\\bench.ps1",
+      "icon": "play"
+    },
+    {
+      "name": "Bench quick",
+      "command": ".\\scripts\\bench.ps1 -Scenario quick",
+      "icon": "play"
+    },
+    {
+      "name": "Bench scale",
+      "command": ".\\scripts\\bench.ps1 -Scenario scale",
+      "icon": "play"
+    },
+    {
+      "name": "Bench 8k single",
+      "command": "cargo run -p canvas-harness --bin bench --release -- --items=8000 --textures=8000",
+      "icon": "play"
+    },
+    {
+      "name": "Run iced host (never draws, SQU-73)",
+      "command": "cargo run -p host-iced --release",
+      "icon": "debug"
+    },
+    {
+      "name": "Run surface probe (never draws, SQU-73)",
+      "command": "cargo run -p probe-surface --release",
+      "icon": "debug"
+    }
+  ]
+}
