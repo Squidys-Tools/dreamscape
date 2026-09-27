@@ -1,96 +1,58 @@
 # Dreamscape
 
-An infinite visual workspace for collecting and arranging visual references.
-Local-first, Windows first, macOS later.
+### The canvas architecture spike. Not the product.
 
-This repository currently contains the **canvas architecture spike** (SQU-60,
-SQU-61): a wgpu renderer and measurement harness for an infinite canvas, built
-to answer whether a board of references pans and zooms at 60fps, and to compare
-three candidate UI libraries as hosts for it.
+Dreamscape is an infinite canvas for collecting and arranging visual references. This repo exists to answer two questions before any of that gets built: does a board of references pan and zoom at 60fps, and which UI library should own the window?
 
-Nothing here is the product yet. It is the measurement that the product
-decisions depend on.
+It is a wgpu renderer, a headless benchmark, and a set of experiments whose only job is to produce a number or settle a question. The questions are tracked in Linear; the numbers live in one place.
 
-## Running the benchmark
+## What it settles
 
-Requires a Rust toolchain (developed against 1.92).
+The canvas renderer. Infinite grid, viewport culling, a fixed-slot texture atlas with lazy per-level mip allocation and eviction that never drops something on screen, and one instanced draw call for the whole board. Text and strokes are not drawn yet.
 
-```sh
+Settled so far, and load-bearing for everything after it:
+
+* One Rust canvas codebase, compiling natively for a native desktop shell and to `wasm32` for a browser. One renderer, not two.
+* The desktop shell is native Rust, not a webview, because a webview cannot share a wgpu device with the canvas.
+* The hosted web version is view-and-modify-only. It cannot add anything, which is what keeps its separate UI affordable.
+* The browser extension is capture-only, so it carries no canvas at all.
+
+## Status
+
+The renderer works and is measured headlessly. The windowed path does not work on the development machine at all.
+
+**Working:** culling, LOD, the atlas, eviction, search, 10 unit tests over the correctness-critical logic, and a reproducible benchmark.
+
+**Not working:**
+
+* **Nothing draws to a window.** A raw winit plus wgpu probe, no UI framework involved, presents 180+ frames with `present()` returning `Ok` and no wgpu errors, and the client area stays white. Confirmed while foregrounded and in a full-desktop capture where other GPU-composited windows render normally. Headless wgpu is fine, so the renderer is fine; the display path on this machine is not. This is the biggest open problem and it is an environment issue, not a code issue.
+* **The benchmark board is too sparse to test the real case.** Only about 5% of items are on screen, so the 2,000-item scenario renders 374. The frame times are real but describe a nearly empty board. Until this is fixed, read the visible column before believing any timing.
+* **No UI toolkit chosen yet.** iced is written and shares one wgpu device. Zed's toolkit is the other candidate and is a dependency question, not a performance one.
+
+Expect rough edges and missing pieces. This is a spike, and spikes that finish are the exception.
+
+## For developers
+
+Rust 1.92 and, later, bun 1.4.2 for the hosted tier's TypeScript. Windows first.
+
+```powershell
 cargo test -p canvas-core                          # 10 unit tests, no GPU needed
-.\scripts\bench.ps1                                # realistic views: 2k / 8k / 20k
-.\scripts\bench.ps1 -Scenario scale                # item counts doubled repeatedly
-.\scripts\bench.ps1 -Scenario quick                # one fast scenario
+.\scripts\bench.ps1                                # the measured scenarios
+.\scripts\bench.ps1 -Scenario quick                # one fast scenario, for a tight loop
+cargo run -p host-iced --release                   # opens a window, draws nothing (see Status)
 ```
 
-Or drive the benchmark directly:
+Expect roughly 2x run-to-run variance on a shared integrated GPU. Read the p99 and the over-budget count, not the mean alone.
 
-```sh
-cargo run -p canvas-harness --bin bench --release -- --items=8000 --textures=8000
-```
+The T3 Code scripts menu runs the same commands, registered in `t3.json`.
 
-Flags: `--items --textures --atlas --width --height --warmup --frames --pan --zoom`.
-Each run prints a human-readable report and a `RESULT key=value ...` line that
-scripts parse.
+**Start here:**
 
-**Expect run-to-run variance of roughly 2x.** The reference machine for these
-numbers is an Intel Iris Xe integrated GPU sharing a Windows desktop, which
-schedules and thermally throttles unpredictably. Read the p99 and the over-budget
-count, not the mean alone.
+- [`AGENTS.md`](AGENTS.md) — what must not be compromised, the glossary, and how to work in this repo
+- [`docs/spikes/canvas-spike.md`](docs/spikes/canvas-spike.md) — the design, the findings that forced it, and every measurement with the command that produced it
+- [`t3.json`](t3.json) — project commands for the T3 Code scripts menu
 
-## Results
-
-Frame time is CPU submit plus a hard `device.poll(Wait)`, which serialises CPU
-and GPU. That is pessimistic against a real app that runs the CPU ahead, so
-treat it as a ceiling.
-
-| Scenario | Peak visible | Mean | p99 | Max | Over budget | Placeholders |
-|---|---|---|---|---|---|---|
-| 2,000 items, 2,000 distinct | 374 | 0.4ms | 0.7-0.8ms | 1.2ms | 0 / 200 | 0.00% |
-| 8,000 items, 8,000 distinct | 1,558 | 0.9-1.6ms | 1.7-4.7ms | 2.9-4.7ms | 0 / 200 | 0.00% |
-| 20,000 items, 20,000 distinct | 3,927 | 3.8-4.6ms | 7.4-7.9ms | 9.4ms | 0 / 200 | 0.00% |
-| 32,000 items, 32,000 distinct | 6,270 | 10.7ms | 22.2ms | 23.4ms | 22 / 200 | 0.00% |
-
-**Only about 5% of items are on screen in these runs** — 374 of 2,000, 3,927 of
-20,000 — because `Config::extent` scatters items over a 24,000-square world area
-while the viewport covers about 7,300 of it. The case SQU-60 actually asks about,
-2,000 items all visible, is **not** what this measures. The frame times above are
-for a sparse board and should not be read as evidence about a full one. See
-`docs/spikes/canvas-spike.md`.
-
-The whole board is one draw call, so draw-call overhead is not a factor at any
-item count.
-
-## Windowed rendering is blocked on this machine
-
-`host-iced` builds and opens a window that never draws, and so does a raw
-winit + wgpu control that clears every frame to magenta: 180+ frames presented,
-`present()` returns `Ok`, no wgpu errors, client area stays white. Headless wgpu
-renders fine. So the headless numbers above are trustworthy and anything needing
-a window is currently blocked. Tracked as SQU-73.
-
-## Layout
-
-| Crate | What it is |
-|---|---|
-| `canvas-core` | Item model, viewport, spatial hash, culling, LOD. No GPU. 10 unit tests. |
-| `canvas-gpu` | wgpu renderer. Texture atlas with lazy per-level allocation and eviction that never drops something on screen. One instanced draw call. |
-| `canvas-app` | Scene, camera, selection and the per-frame pipeline. Shared by every host so their frame times are comparable. |
-| `canvas-harness` | Headless driver over `canvas-app`, plus frame metrics. No asset files. |
-| `host-iced` | iced 0.14 host, sharing one wgpu device with the canvas. Written; blocked on SQU-73. |
-| `probe-surface` | Throwaway raw winit + wgpu control for the presentation bug. |
-
-`host-wgpui` and `host-gpui` do not exist yet.
-
-See `docs/spikes/canvas-spike.md` for the design, the decision rule for
-choosing a UI library, and what is still outstanding.
-
-## What is not measured
-
-Real photographs, file decoding, text, drawing tools, selection, grouping, any
-sidebar, any UI library, and anything requiring a visible window. A dense board,
-where all 2,000 items are on screen at once. This measures whether the canvas
-renderer can draw a sparse board quickly, which is a necessary condition for the
-architecture but not a sufficient one.
+There is no `docs/` hierarchy and no changelog yet, on purpose. A spike with one internals document does not need them.
 
 ## Licence
 

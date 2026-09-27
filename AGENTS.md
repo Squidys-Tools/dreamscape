@@ -1,115 +1,176 @@
-# Working in this repository
+# Dreamscape
 
-## What this is
+Dreamscape is an infinite canvas for collecting and arranging visual references. This repo is not the product. It is the **canvas architecture spike** (SQU-60): a wgpu renderer, a headless benchmark, and the experiments that decide how the canvas gets hosted.
 
-The canvas architecture spike for Dreamscape: a wgpu renderer for an infinite
-canvas, a headless benchmark, and UI host experiments. Read
-`docs/spikes/canvas-spike.md` before changing anything in the renderer. It
-records findings that are not obvious from the code and will bite anyone who
-rediscover them.
+Think of it as the measurement the product decisions depend on. Most of the code here exists to produce a number or settle a question, and the questions are tracked in Linear, not in this repo.
 
-Architecture decisions are **not** recorded here. They live in Linear, project
-Dreamscape, as `decision` issues, so they can be argued and revised. This file
-records only how to build and what the conventions are.
+## What must not be compromised
 
-## Toolchain
+The entire value of this repo is that its numbers can be trusted. Everything else is negotiable. These are the specific ways that stops being true, and every one of them has actually happened here.
 
-* Rust 1.92. `rust-version` is pinned in the workspace `Cargo.toml`.
-* **bun for all JavaScript work.** Not npm, not yarn, not pnpm. `bun install`,
-  `bun run`, `bun test`. bun 1.4.2 is on PATH.
-* Vite is the bundler for the hosted web app, driven by bun. Not built yet.
-* The `wasm32-unknown-unknown` target is already installed. No `rustup target
-  add` needed.
-* `just` is **not** installed, so nothing may invoke it. `t3.json` at the repo
-  root is where project commands are registered, and that is what the T3 Code
-  scripts menu runs.
+### 1. A number you cannot reproduce is worse than no number
 
-Two lockfiles are expected once `web/` exists: `Cargo.lock` and
-`web/bun.lock`. Cargo and bun share no root manifest, so build order is
-orchestrated explicitly in `t3.json`.
+An unreproducible figure is not a neutral leftover, it is a trap for whoever reads it next. This repo shipped a table claiming 1,194 visible items and 32-42ms at 20,000 items. None of it could be reproduced from the code that produced it. The claims were removed rather than adjusted.
 
-## Layout, as it exists today
+Watch for: quoting a figure from an earlier run, averaging across two different configurations, transcribing a number by hand off a terminal, and reporting a mean without the p99 and the over-budget count beside it. Expect roughly 2x run-to-run variance on a shared iGPU, so a single run is a sample, not a result.
 
-```
-crates/
-  canvas-core/     culling, LOD, spatial index, item model. No GPU, no platform deps.
-  canvas-gpu/      the wgpu renderer
-  canvas-app/      scene, camera, selection, search, the per-frame pipeline
-  canvas-harness/  headless driver over canvas-app, plus frame metrics
-  host-iced/       iced 0.14 host sharing one device with the canvas
-  probe-surface/   throwaway raw winit + wgpu control for SQU-73
-scripts/
-  bench.ps1
-docs/
-  spikes/canvas-spike.md
-```
+### 2. Measure the case, not a proxy for it
 
-## Layout, as planned
+The scene is generated, which means it can be generated wrong, and the benchmark will happily report a beautiful number for an empty board. `Config::extent` is 12,000, which scatters items across a 24,000-square world area while a 2560x1440 viewport covers about 7,300 of it. Only 5% of items were ever on screen. The 2,000-item scenario rendered 374 items in 0.4ms. The number was real and the claim was worthless.
 
-These do not exist yet. Tracked in Linear; listed here so the shape is agreed
-before anyone starts building.
+The same trap in other forms: a still frame is not a pan, CPU submit is not frame time, headless is not windowed, and "visible" is not the same as "distinct textures".
 
-* `crates/canvas-wasm/` — thin wasm-bindgen surface over `canvas-app`
-* `crates/app-core/` — storage, ingest, embedding orchestration
-* `crates/host-desktop/` — the chosen native shell, superseding `host-iced`
-* `web/hosted/` — the hosted tier's chrome, TypeScript
+### 3. Never quietly change what a metric means
 
-**Keep `wasm-bindgen`, `js-sys` and `web-sys` out of `canvas-app`.** The Rust
-side will have three consumers: the native desktop app, WASM in a browser, and a
-server for the paid tier's inference. Platform-specific dependencies in a shared
-crate erode that layering, so the web surface belongs in its own thin crate.
+The `RESULT` line emitted by the bench binary once had a `visible` field, then was refactored to emit `peak_visible` and dropped a `submit_ms` field. `scripts/bench.ps1` kept reading the old names. In PowerShell a missing key is `$null`, which casts to `0`, so the Visible and CpuMs columns printed `0` and `0.00` and the script looked like it was working.
 
-## Commands
+If a metric changes name, unit or meaning, every consumer changes in the same commit: the `FrameStats` field, the `RESULT` line, the parser, the report, and the table in the docs. `bench.ps1` now throws on any missing key for exactly this reason. Do not loosen that.
 
-Verified working. The T3 Code scripts menu runs the same list.
+### 4. The canvas is one codebase, or it is two
 
-```sh
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets
-cargo fmt --all -- --check
-cargo test -p canvas-core                     # 10 unit tests, no GPU needed
+Settled in SQU-72. The canvas is Rust and compiles twice, natively for the desktop app and to `wasm32` for the browser. A web view cannot share a wgpu device with the canvas, because the view owns its own GPU context, which is why the desktop shell is native and the hosted tier is a web page with its own chrome.
 
-.\scripts\bench.ps1                           # 2k / 8k / 20k
-.\scripts\bench.ps1 -Scenario quick            # one fast scenario
-.\scripts\bench.ps1 -Scenario scale            # counts doubled, all on screen
-cargo run -p canvas-harness --bin bench --release -- --items=8000 --textures=8000
-```
+The failure mode is drifting toward two renderers. Putting `wasm-bindgen` in `canvas-app` instead of its own thin crate. Hand-declaring a shape in TypeScript that Rust already defines. Rebuilding the canvas in TypeScript "just for the web tier".
 
-`cargo clippy` currently emits one warning in `canvas-gpu` about indexing
-`per_row`. It is pre-existing and deliberately left alone, so a clean run means
-"one warning", not "no warnings".
+### 5. Document what exists, not what is intended
 
-Benchmarks print a `RESULT key=value ...` line. `scripts/bench.ps1` parses it and
-**throws on any missing key**, because a missing PowerShell key silently becomes
-`0` and a broken run looks like a fast one. Do not loosen that.
+This file once described a `justfile`, a `web/` directory and three crates, none of which existed, and named `crates/host-desktop/` where the real directory is `crates/host-iced/`. It was documenting the planned repo as though it were the current one, which broke the rule two sections below it.
 
-## Known-broken
+Planned structure goes in Linear. At most a short "as planned" list here, clearly marked.
 
-Do not use these to conclude anything, they are documented so nobody re-derives
-the failure.
+## A note on taste
 
-* **`cargo run -p host-iced` opens a window and never draws.** Tracked as
-  SQU-73. It is a machine-level presentation failure, not a bug in the host: a
-  raw winit + wgpu probe presents 180+ frames with `present()` returning `Ok` and
-  the client area still shows nothing.
-* **The benchmark board is too sparse to test the case SQU-60 specifies.** Only
-  about 5% of items are on screen, so the 2,000-item scenario renders 374. Fixed
-  by SQU-84; until then read the visible column before believing any frame time.
+Simple software that feels obvious beats impressive machinery. Do not preserve complexity just because it already exists. Do not introduce machinery because it looks architecturally impressive. Understand the real constraint, then fight for the smallest model that makes the correct behavior unsurprising.
 
-## Conventions
+Channel both "measure twice, cut once" and "yagni". Fight scope creep. Try to honor the dev's intent in both a minimal and realistic fashion.
 
-* **Comments explain why, not what.** The existing code carries a reasoning
-  comment wherever a choice looks odd, especially where a finding forced the
-  design. Match that density or raise it. A comment restating the line below it
-  is noise.
-* Never commit generated output. `canvas-wasm/pkg/` will be produced by
-  `wasm-pack build` and is build output, not source.
-* Types crossing the Rust/TypeScript seam come from `wasm-bindgen`. Never
-  hand-declare a shape in TypeScript that Rust also defines; that is how the two
-  sides silently diverge.
-* Measurement claims belong in `docs/spikes/canvas-spike.md` with the command
-  that produced them. If a number cannot be reproduced, remove it rather than
-  adjusting it.
-* **This file describes the repo as it is.** Do not write down a crate, path or
-  command that does not exist yet. Planned structure goes in Linear, and at most
-  a short "as planned" list here.
+The rest of this document is meant to help you navigate the codebase and make changes effectively. Think of these instructions less as "hard rules", more as "good defaults". The developer's preferences should be able to override anything here.
+
+If a rule here fights the task in front of you, say so plainly and get a human sign off before breaking it.
+
+## Glossary
+
+We need to be on the same page with terminology. When communicating, use this language:
+
+- **you** means the agent reading this file and changing Dreamscape.
+- **we and maintainers** mean the people building Dreamscape. That is who you are talking to now.
+- **board** means the infinite canvas surface. The thing being drawn.
+- **item** means one thing on the board: an image, text, video, swatch or stroke. Data, not UI.
+- **atlas** means the fixed-slot GPU texture holding the mip levels of every visible thumbnail.
+- **mip level** means one resolution of a thumbnail's pyramid. Level 0 is full size.
+- **resident** means a mip level currently occupying an atlas slot.
+- **placeholder** means a flat swatch drawn because no level could be placed. A bug signal, not styling.
+- **cull** means deciding which items intersect the viewport. Runs every frame.
+- **LOD** means picking which mip level an item draws at, from its size on screen.
+- **peak visible** means the most items on screen in any measured frame. This is the number that says whether a scene is dense enough for its frame times to mean anything.
+- **frame time** means CPU submit plus a hard `device.poll(Wait)`. It serialises CPU and GPU, so it is a ceiling rather than a typical frame.
+- **over budget** means frames over 16.67ms, the 60fps threshold.
+- **seam** means the small interface between the canvas and whatever hosts it. One definition, two implementations.
+- **desktop shell** means the native Rust UI on Windows. Shares one wgpu device with the canvas.
+- **hosted tier** means the paid web version. View and modify only; you cannot add anything to it.
+- **capture-only** means the browser extension's entire job. It carries no canvas and no UI.
+- **spike** means code that exists to produce a measurement or settle a question, not to ship.
+
+## The four ways to hurt yourself
+
+1. **Reading a frame time without the visible count beside it.** This is the single most expensive mistake available here, and it has already produced a comfortable-looking table that means nothing. Peak visible is not a footnote, it is the validity check on everything else in the row.
+
+2. **Writing a number into the docs from memory, or from a terminal you happened to have open.** Capture the run, read the number off the captured output. If you cannot say which command and which machine produced a figure, it does not go in the docs.
+
+3. **Killing by pattern, or blocking on a sleep.** Never `Stop-Process -Name`, `pkill -f`, or kill a PID found by matching a name or path. This repo runs inside T3 Code and the machine runs other things. Kill only a PID you captured at spawn. Never `Start-Sleep` after launching a bench or a server: start it detached, do other work, then poll its log.
+
+4. **Committing generated output or a machine-specific path.** `canvas-wasm/pkg/` is `wasm-pack` output. Never hardcode an absolute user path, a machine-specific cache location, or a localhost port into source or committed config. A fresh clone on another Windows machine has to work.
+
+## Hit every surface
+
+The common defect here is a change that works on the path you tested and is missing everywhere else. Before calling work done, walk this list and say which entries applied.
+
+- **Entry points.** The per-frame pipeline is reached by `canvas-harness`, by `host-iced`, and later by the WASM host and the server. A change to `AppState::draw_frame` has to hold in all of them, not just the one you ran.
+- **Targets.** Native and `wasm32-unknown-unknown`. Platform-specific dependencies in a shared crate erode the layering that lets one renderer serve both, so check that `canvas-core`, `canvas-gpu` and `canvas-app` still build for a target that has no window system.
+- **Metrics.** A field flows from `FrameStats` to the `RESULT` line to `bench.ps1` to the report to the table in the docs. All of them or none. See principle 3.
+- **Reverse states.** A new bench scenario needs a row in the docs table. A new crate needs removing from the workspace when it goes, and its dependency tree out of `Cargo.lock`. Adding a way in without a way out is a bug.
+- **Docs.** Check whether the change makes existing guidance inaccurate. Apply the documentation rules before adding anything new.
+
+## Running things
+
+- Rust 1.92, pinned as `rust-version` in the workspace `Cargo.toml`. `cargo` is the only build tool for the Rust side.
+- `wasm32-unknown-unknown` is already installed. No `rustup target add` needed.
+- **bun for all JavaScript work.** Not npm, not yarn, not pnpm. bun 1.4.2 is on PATH.
+- `just` is not installed, so nothing may invoke it. Project commands are registered in `t3.json` at the repo root, and that is what the T3 Code scripts menu runs.
+- Cargo and bun share no root manifest, so build order across the two ecosystems is orchestrated explicitly rather than by a root task runner.
+- Never start a windowed binary and then immediately assert what it drew. See the known-broken list.
+
+## Verifying
+
+- Smallest proof that the change works. The focused test for the module you touched, plus targeted checks for the scope you changed.
+- Test meaningful logic. Do not add a test that mirrors the implementation or asserts wiring with no behavior. The 10 tests in `canvas-core` cover culling, the spatial index and LOD, which is where the correctness risk actually lives.
+- A GPU change is verified by running the benchmark, not by reading the diff. `.\scripts\bench.ps1 -Scenario quick` is the fast loop; the full sweep is the real one.
+- `cargo clippy` currently emits one pre-existing warning in `canvas-gpu` about indexing `per_row`. It is deliberately left alone, so a clean run means "one warning", not "no warnings".
+- Never claim a check you did not run. If a number is reported, say which command produced it and on which machine.
+
+## Linear issues
+
+- One Linear issue owns one task. That issue is the tracker, not a plan file and not a checklist in this repo.
+- Before starting: read the issue and its comments, move it to In Progress, branch from its `gitBranchName`.
+- While working: post progress as issue comments. Never rewrite the description to add a log.
+- Before finishing: move the issue to its review state, and mark it Done only once the work is landed or the developer confirms.
+- A merged commit is the implementation record. Do not preserve a second checklist in the repository.
+
+## Documentation
+
+Most code changes need no docs change. Agents can read the code.
+
+- `docs/spikes/canvas-spike.md` is the internals document: the design, the findings that forced it, and the measurements, each with the command that produced it. That is the only home for a measurement.
+- `AGENTS.md` is how to work in this repo. `README.md` is the front door and an index.
+- **Do not invent a second place for the same fact.** The README used to carry its own copy of the benchmark table, which is a copy that drifts. It links instead.
+- Before adding a paragraph, ask what a maintainer would get wrong without it. If reading the relevant code answers the question, leave it out.
+- Do not document every crate, enumerate modules, narrate control flow, or append commit summaries. The code and the tests already record the implementation.
+- Keep a local implementation explanation in a nearby code comment. Use the spike document when the reasoning crosses crate boundaries.
+- When a documented decision or constraint changes, rewrite or remove the affected text. Do not append another account of the new behavior.
+- A new document needs a distinct, durable reason to exist. A spike with one internals document does not need a `docs/` hierarchy yet.
+
+## How it works
+
+Every frame, in every consumer: advance the camera, cull the grid to the viewport, pin the visible set, request a mip level for anything not already resident, upload those, encode one instanced draw call, submit.
+
+A host supplies the device, the queue and a target texture view. The canvas renders into its own offscreen `Rgba8UnormSrgb` texture, and the host blits that texture inside its existing render pass, so nothing crosses the CPU. The headless harness does the same into a plain texture and additionally waits for the GPU, which is why its numbers are a ceiling.
+
+Full reasoning, and the findings that shaped it, in `docs/spikes/canvas-spike.md`.
+
+## Where code lives
+
+- `crates/canvas-core` is the item model, viewport, spatial hash, culling and LOD. No GPU, no platform dependencies, 10 unit tests. Most of the correctness risk lives here.
+- `crates/canvas-gpu` is the wgpu renderer: fixed-slot atlas, lazy per-level allocation, eviction, one instanced draw call.
+- `crates/canvas-app` is the scene, camera, selection, search and the per-frame pipeline. Every consumer links this, so the only thing that differs between them is how the chrome is drawn.
+- `crates/canvas-harness` is the headless driver over `canvas-app` plus frame metrics. No asset files.
+- `crates/host-iced` is an iced 0.14 host sharing one wgpu device with the canvas. It compiles and has never rendered a pixel; see the known-broken list.
+- `crates/probe-surface` is a throwaway raw winit plus wgpu control. Delete it once presentation works.
+- `scripts/bench.ps1` is the benchmark runner. `docs/spikes/canvas-spike.md` is the only internals document.
+
+## Known broken
+
+Recorded so nobody re-derives the failure. Both are tracked in Linear.
+
+- **`cargo run -p host-iced` opens a window and never draws.** SQU-73. This is a machine-level presentation failure, not a bug in the host. A raw winit plus wgpu probe presents 180+ frames with `present()` returning `Ok` and no wgpu errors, and the client area still shows nothing. Confirmed while foregrounded, and in a full-desktop capture where other GPU-composited windows render normally.
+- **The benchmark board is too sparse to test the case SQU-60 specifies.** Only about 5% of items are on screen, so the 2,000-item scenario renders 374. SQU-84. Until it is fixed, read the visible count before believing any frame time.
+
+## Taste
+
+- Complexity belongs at the adapter boundary. The renderer stays pure, hosts stay dumb.
+- Inferred types over annotations.
+- Comments explain why, not what. The existing code carries a reasoning comment wherever a choice looks odd, especially where a finding forced the design. Match that density or raise it. A comment restating the line below it is noise.
+- The whole board is one draw call, so resist adding batching logic at low item counts. It is not where the time goes.
+- A grey placeholder on screen is a bug report about the atlas, never a styling decision.
+- If a rule here fights the task in front of you, say so loudly and get a human sign-off before breaking it.
+
+## Working in this harness
+
+These apply when running inside T3 Code only, and they override nothing above.
+
+- Screenshots the user must see never render from a tool result. Save with `screenshot_out_file` and embed the path, so the image survives the turn.
+- Computer use is for looking at a window, not for driving the product. Do not use it to verify unless the developer agrees or asks.
+
+## Additional tips
+
+- Do not verify with a browser or computer use unless the developer agrees or asks.
+- A spike earns its keep by settling a question. If code has outlived the question it was written to answer, deleting it is the correct change.

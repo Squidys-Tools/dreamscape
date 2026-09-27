@@ -1,44 +1,34 @@
 # Canvas architecture spike
 
-Tests the assumption SQU-60 rests on: that a 2,000-item board pans and zooms at
-60fps, and that a UI library can host that canvas without a per-frame copy
-between the two.
+The internals document for Dreamscape's canvas renderer: the design, the
+findings that forced it, and every measurement with the command that produced
+it.
 
-## Why this is three configurations, not two
+Two questions live here. Does a 2,000-item board pan and zoom at 60fps, and what
+does the canvas need from whatever hosts it. The second one is now settled, and
+the first has to survive it.
 
-The canvas renderer is shared. The *host* is not, because the two families of UI
-library disagree about what owns the GPU:
+## What the canvas is, and what hosts it
 
-| Config | Renderer | Shares one wgpu device with the canvas? |
-|---|---|---|
-| `host-iced` | `iced_wgpu`, which *is* wgpu | Yes, first-party. `Renderer::draw` targets any `TextureView`. |
-| `host-wgpui` | wgpu + winit (fork of gpui-ce) | Yes, via the fork. |
-| `host-gpui` | D3D12 / Metal / Vulkan | **No.** A texture copy per frame is unavoidable. |
+The renderer is one Rust codebase. It compiles natively for a native desktop
+shell and to `wasm32` for a browser, so the desktop app and the hosted web tier
+share it instead of each owning a copy. A web view cannot share a wgpu device
+with the canvas, because the view owns its own GPU context, which is why the
+desktop shell is native and the hosted tier is a web page with its own chrome.
 
-So the third config is not a fourth option, it is the control. If gpui-as-is
-lands inside budget, the fork question is moot. If it does not, gpui only stays
-in the running by way of a fork of a fork, and iced wins by default.
+What a host has to provide is small: a device, a queue, a target texture view,
+and somewhere to send pointer, wheel and keyboard events. The canvas renders
+into its own texture and the host blits it, so nothing crosses the CPU. That
+interface gets written twice and should be designed once.
 
-Only the `iced` row has been demonstrated. The `host-wgpui` and `host-gpui` rows
-are the design's assumptions, not measurements, and the wgpu version each one
-pins has not been checked — a mismatch with `canvas-gpu` would force a second
-device and a per-frame copy, which is exactly the cost the table claims to
-avoid. Treat both rows as unverified until SQU-75 and SQU-76 report.
+Which toolkit draws the chrome on the desktop is still open, and it is a
+dependency question rather than a performance one. The renderer is identical
+whichever one wins and the chrome is a fraction of the pixels, so a frame-time
+comparison between two toolkits would be optimising the part that is already
+settled.
 
-## Crates
-
-- `canvas-core` — item model, viewport, spatial hash, culling, LOD. No GPU.
-  10 unit tests, all green. Most of the correctness risk lives here.
-- `canvas-gpu` — wgpu renderer. Fixed-slot atlas with LRU eviction, mip pyramid,
-  one instanced draw call.
-- `canvas-app` — the scene, camera, selection, search and per-frame pipeline, in
-  one place. Every host links this, so the only thing that differs between hosts
-  is how the chrome is drawn, which is what makes their frame times comparable.
-- `canvas-harness` — headless driver over `canvas-app`, plus frame metrics. No
-  asset files.
-- `host-*` — the three UI hosts. Only `host-iced` exists.
-- `probe-surface` — throwaway control that isolates raw winit + wgpu from any UI
-  framework. Kept because SQU-73 needs it; delete it once presentation works.
+Crates and their boundaries are in `AGENTS.md`. Everything below is measurement
+or reasoning.
 
 ## Decision rule, fixed before running
 
@@ -53,7 +43,7 @@ avoid. Treat both rows as unverified until SQU-75 and SQU-76 report.
    showing grey placeholders means the atlas is undersized, not that eviction is
    broken. Those are different failures and the harness reports them separately.
 
-If more than one config passes, the tiebreak is the one that needs no fork.
+If more than one approach passes, the tiebreak is the one that needs no fork.
 
 ## Measured
 
@@ -204,10 +194,16 @@ intended stack.
 - Restore a GPU-vs-CPU split if any decision depends on which side is the
   bottleneck.
 - `host-iced`: written, shares one wgpu device with the canvas, and has never
-  rendered. Finish it once presentation works.
-- `host-wgpui`: confirm it builds against a current toolchain and shares the
-  device, rather than assuming it.
-- `host-gpui`: establish whether it is even dependable standalone before
-  measuring the per-frame copy.
-- Canvas text via `cosmic-text` + `glyphon`, verified against the chrome's text.
-- Decide atlas capacity policy, or move off the atlas.
+  rendered. Assess it as a product shell, not as a frame-time benchmark.
+- Zed's UI toolkit (`wgpu`, formerly `gpui`): establish whether it is dependable
+  as an external dependency before anything else. The pinned wgpu version
+  matters more than anything else about it.
+- Choose between them, and record the reasoning.
+- Compile the renderer to `wasm32` and measure it in a browser. Nothing has ever
+  done this and the whole plan rests on it working.
+- Design the canvas/host seam once, so both implementations share a definition.
+- Canvas text via `cosmic-text` + `glyphon`. Anything drawn in the renderer is
+  shared between desktop and web, and the chrome is not, so this is the
+  highest-leverage piece of the renderer rather than a later polish item.
+- Decide atlas capacity policy, or move off the atlas. The web has a smaller
+  texture budget than the desktop, so there are two answers, not one.
