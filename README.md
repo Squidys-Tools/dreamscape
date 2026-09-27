@@ -43,21 +43,30 @@ Frame time is CPU submit plus a hard `device.poll(Wait)`, which serialises CPU
 and GPU. That is pessimistic against a real app that runs the CPU ahead, so
 treat it as a ceiling.
 
-| Scenario | Visible | Mean | p99 | Max | Over budget | Placeholders |
+| Scenario | Peak visible | Mean | p99 | Max | Over budget | Placeholders |
 |---|---|---|---|---|---|---|
-| 2,000 items, 2,000 distinct | 1,194 | 1.6ms | 4-5ms | 6-11ms | 0 / 200 | 0.00% |
-| 8,000 items, 8,000 distinct | 4,967 | 6.7-13.3ms | 24-55ms | 29-124ms | 7-54 / 200 | 0.00% |
-| 20,000 items, 20,000 distinct | 12,431 | 32-42ms | 121-160ms | 134-287ms | 130-140 / 200 | 0.00% |
+| 2,000 items, 2,000 distinct | 374 | 0.4ms | 0.7-0.8ms | 1.2ms | 0 / 200 | 0.00% |
+| 8,000 items, 8,000 distinct | 1,558 | 0.9-1.6ms | 1.7-4.7ms | 2.9-4.7ms | 0 / 200 | 0.00% |
+| 20,000 items, 20,000 distinct | 3,927 | 3.8-4.6ms | 7.4-7.9ms | 9.4ms | 0 / 200 | 0.00% |
+| 32,000 items, 32,000 distinct | 6,270 | 10.7ms | 22.2ms | 23.4ms | 22 / 200 | 0.00% |
 
-The 2,000-item case that SQU-60 specifies passes with roughly 10x headroom. Past
-about 5,000 simultaneously visible distinct images it degrades, and past about
-12,000 it is over budget.
-
-**It is CPU-bound, not GPU-bound**, at 85-90% CPU share throughout. The cost is
-culling, building the per-frame instance buffer, and uploading texture levels.
+**Only about 5% of items are on screen in these runs** — 374 of 2,000, 3,927 of
+20,000 — because `Config::extent` scatters items over a 24,000-square world area
+while the viewport covers about 7,300 of it. The case SQU-60 actually asks about,
+2,000 items all visible, is **not** what this measures. The frame times above are
+for a sparse board and should not be read as evidence about a full one. See
+`docs/spikes/canvas-spike.md`.
 
 The whole board is one draw call, so draw-call overhead is not a factor at any
 item count.
+
+## Windowed rendering is blocked on this machine
+
+`host-iced` builds and opens a window that never draws, and so does a raw
+winit + wgpu control that clears every frame to magenta: 180+ frames presented,
+`present()` returns `Ok`, no wgpu errors, client area stays white. Headless wgpu
+renders fine. So the headless numbers above are trustworthy and anything needing
+a window is currently blocked. Tracked as SQU-73.
 
 ## Layout
 
@@ -65,8 +74,12 @@ item count.
 |---|---|
 | `canvas-core` | Item model, viewport, spatial hash, culling, LOD. No GPU. 10 unit tests. |
 | `canvas-gpu` | wgpu renderer. Texture atlas with lazy per-level allocation and eviction that never drops something on screen. One instanced draw call. |
-| `canvas-harness` | Procedural scene and textures, frame metrics. No asset files. |
-| `host-*` | The three UI library hosts. Not built yet. |
+| `canvas-app` | Scene, camera, selection and the per-frame pipeline. Shared by every host so their frame times are comparable. |
+| `canvas-harness` | Headless driver over `canvas-app`, plus frame metrics. No asset files. |
+| `host-iced` | iced 0.14 host, sharing one wgpu device with the canvas. Written; blocked on SQU-73. |
+| `probe-surface` | Throwaway raw winit + wgpu control for the presentation bug. |
+
+`host-wgpui` and `host-gpui` do not exist yet.
 
 See `docs/spikes/canvas-spike.md` for the design, the decision rule for
 choosing a UI library, and what is still outstanding.
@@ -74,8 +87,10 @@ choosing a UI library, and what is still outstanding.
 ## What is not measured
 
 Real photographs, file decoding, text, drawing tools, selection, grouping, any
-sidebar, any UI library. This measures whether the canvas can draw a busy board
-fast enough, which is the assumption the rest of the architecture rests on.
+sidebar, any UI library, and anything requiring a visible window. A dense board,
+where all 2,000 items are on screen at once. This measures whether the canvas
+renderer can draw a sparse board quickly, which is a necessary condition for the
+architecture but not a sufficient one.
 
 ## Licence
 

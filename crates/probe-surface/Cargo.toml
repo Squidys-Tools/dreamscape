@@ -1,0 +1,14 @@
+[package]
+name = "probe-surface"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Deliberately mirrors the versions iced 0.14 uses (wgpu 27 + winit 0.30) so a
+# result here transfers to iced/WGPUI/gpui. No iced involved: this isolates
+# "can wgpu present to a window on this machine" from anything iced does.
+[dependencies]
+wgpu = "27"
+winit = "0.30"
+pollster = "0.4"
+env_logger = "0.11"

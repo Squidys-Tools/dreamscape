@@ -19,14 +19,26 @@ So the third config is not a fourth option, it is the control. If gpui-as-is
 lands inside budget, the fork question is moot. If it does not, gpui only stays
 in the running by way of a fork of a fork, and iced wins by default.
 
+Only the `iced` row has been demonstrated. The `host-wgpui` and `host-gpui` rows
+are the design's assumptions, not measurements, and the wgpu version each one
+pins has not been checked — a mismatch with `canvas-gpu` would force a second
+device and a per-frame copy, which is exactly the cost the table claims to
+avoid. Treat both rows as unverified until SQU-75 and SQU-76 report.
+
 ## Crates
 
 - `canvas-core` — item model, viewport, spatial hash, culling, LOD. No GPU.
   10 unit tests, all green. Most of the correctness risk lives here.
 - `canvas-gpu` — wgpu renderer. Fixed-slot atlas with LRU eviction, mip pyramid,
   one instanced draw call.
-- `canvas-harness` — procedural content and frame metrics. No asset files.
-- `host-*` — the three UI hosts.
+- `canvas-app` — the scene, camera, selection, search and per-frame pipeline, in
+  one place. Every host links this, so the only thing that differs between hosts
+  is how the chrome is drawn, which is what makes their frame times comparable.
+- `canvas-harness` — headless driver over `canvas-app`, plus frame metrics. No
+  asset files.
+- `host-*` — the three UI hosts. Only `host-iced` exists.
+- `probe-surface` — throwaway control that isolates raw winit + wgpu from any UI
+  framework. Kept because SQU-73 needs it; delete it once presentation works.
 
 ## Decision rule, fixed before running
 
@@ -52,21 +64,74 @@ pessimistic against a pipelined app.
 `./scripts/bench.ps1` reproduces these. Expect roughly 2x run-to-run variance on
 a shared iGPU; read p99 and the over-budget count rather than the mean.
 
-| Scenario | Visible | Mean | p99 | Max | Over budget | Placeholders |
+| Scenario | Peak visible | Mean | p99 | Max | Over budget | Placeholders |
 |---|---|---|---|---|---|---|
-| 2,000 items / 2,000 distinct | 1,194 | 1.6ms | 4-5ms | 6-11ms | 0/200 | 0.00% |
-| 8,000 items / 8,000 distinct | 4,967 | 6.7-13.3ms | 24-55ms | 29-124ms | 7-54/200 | 0.00% |
-| 20,000 items / 20,000 distinct | 12,431 | 32-42ms | 121-160ms | 134-287ms | 130-140/200 | 0.00% |
-| 32,000 items / 32,000 distinct, all on screen | 32,000 | 774ms | 5,100ms | 6,177ms | 150/150 | 0.00% |
+| 2,000 items / 2,000 distinct | 374 | 0.4ms | 0.7-0.8ms | 1.2ms | 0/200 | 0.00% |
+| 8,000 items / 8,000 distinct | 1,558 | 0.9-1.6ms | 1.7-4.7ms | 2.9-4.7ms | 0/200 | 0.00% |
+| 20,000 items / 20,000 distinct | 3,927 | 3.8-4.6ms | 7.4-7.9ms | 9.4ms | 0/200 | 0.00% |
+| 32,000 items / 32,000 distinct | 6,270 | 10.7ms | 22.2ms | 23.4ms | 22/200 | 0.00% |
 
-The 2,000-item case SQU-60 specifies passes with about 10x headroom. Degradation
-starts near 5,000 simultaneously visible distinct images; 12,000 is over budget.
-The 32,000 case is a wall of thumbnails, not a moodboard, and is listed to show
-where the wall is rather than as a target.
+The whole board is one draw call with no batching logic, so draw-call overhead is
+not a factor at any item count.
 
-**CPU-bound at 85-90% throughout.** The cost is culling, building the per-frame
-instance buffer, and uploading texture levels. The whole board is one draw call
-with no batching logic, so draw-call overhead is not a factor at any item count.
+### The scene is too sparse to answer SQU-60
+
+**Read the visible column before believing any of these numbers.** Only about 5%
+of items are on screen: 374 of 2,000, 3,927 of 20,000. `Config::extent` is
+12,000, so items are scattered over a 24,000 x 24,000 world area, while at
+`start_scale` 0.35 a 2560x1440 viewport covers only 7,314 x 4,114 of it. The
+measured area ratio, 5.2%, matches the observed visible fraction exactly.
+
+That means the headline case in SQU-60 — "2,000 items, all visible" — is **not
+currently being measured**. What is measured is a 374-item board. The
+correspondingly reassuring frame times say very little about a board that is
+actually full.
+
+An earlier revision of this document reported 1,194 visible of 2,000 and 20,000
+items at 32-42ms and over budget. Those figures are not reproducible from the
+current code and have been removed rather than adjusted. Re-tuning `extent` to
+make the board dense is a change to the measured configuration and belongs with
+SQU-60, not in a cleanup commit; until it happens, treat every row above as
+"a sparse board" rather than "a moodboard".
+
+### The CPU/GPU split is no longer measured
+
+This document previously claimed the workload was "CPU-bound at 85-90%"
+throughout. The refactor into `canvas-app` kept a single `FrameStats::cpu`
+timing and dropped the separate GPU timing, so that claim can no longer be
+substantiated and has been removed. `bench.ps1` no longer prints a `CpuMs`
+column for the same reason. Restoring the split needs a timestamp-query or
+buffer-readback path, and nothing currently depends on it.
+
+## Windowed presentation does not work on the dev machine
+
+Every windowed host built here opens a real window and never draws a pixel. This
+is not a bug in the canvas code, and it is not specific to iced.
+
+`crates/probe-surface` is the control: raw winit 0.30 and raw wgpu 27, no UI
+framework, clearing every frame to solid magenta. It reports
+
+```
+adapter: Intel(R) Iris(R) Xe Graphics / Vulkan
+presented frame 1 / 2 / 3 / 60 / 120 / 180
+```
+
+`present()` returns `Ok` on every frame, the surface configures cleanly,
+`VK_KHR_swapchain` is present, and wgpu logs no error — and the window client
+area stays white. Confirmed while the window was explicitly foregrounded, and
+confirmed again in a full-desktop capture where other GPU-composited windows
+render normally, so it is not a screenshot artefact. Headless wgpu renders
+correctly on the same machine, so the GPU and the wgpu build are fine.
+
+Three hosts were tried and all blank: iced 0.14, iced 0.13.1, and the raw probe.
+Process inspection during the iced hang showed 27 threads all in wait, one in
+`LpcReply`, which is suggestive of a kernel or driver call but is not proof.
+
+The consequence for this spike: **no wgpu host can be visually verified or timed
+on this machine.** Headless numbers are trustworthy; anything requiring a window
+is blocked. Tracked as SQU-73. One loose end there: `WGPU_BACKEND=dx12` is
+ignored by wgpu 27 here, which still selected Vulkan, so DX12 is genuinely
+untested and needs the backend hard-coded rather than set by environment.
 
 ## Findings that changed the design
 
@@ -133,8 +198,16 @@ intended stack.
 
 ## Still to do
 
-- `host-iced`: reference implementation, one wgpu device shared with the canvas.
-- `host-wgpui`: fetch the fork, confirm it builds against a current toolchain.
-- `host-gpui`: measure the cost of the per-frame texture copy.
+- Re-tune `Config::extent` so the board is dense enough to test the "2,000
+  items, all visible" case, then re-measure. Everything in **Measured** is
+  provisional until that happens.
+- Restore a GPU-vs-CPU split if any decision depends on which side is the
+  bottleneck.
+- `host-iced`: written, shares one wgpu device with the canvas, and has never
+  rendered. Finish it once presentation works.
+- `host-wgpui`: confirm it builds against a current toolchain and shares the
+  device, rather than assuming it.
+- `host-gpui`: establish whether it is even dependable standalone before
+  measuring the per-frame copy.
 - Canvas text via `cosmic-text` + `glyphon`, verified against the chrome's text.
 - Decide atlas capacity policy, or move off the atlas.

@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
-use canvas_core::{MIP_LEVELS, Vec2, VisibleItem};
+use canvas_core::{Vec2, VisibleItem, MIP_LEVELS};
 
 /// Mip level `i` of a pyramid generated at [`canvas_core::BASE_MIP`].
 pub fn mip_size(level: u32) -> u32 {
@@ -416,7 +416,6 @@ impl Atlas {
         any
     }
 
-
     /// Zero-area uv aimed at the single placeholder texel at the atlas origin.
     ///
     /// Sampling one texel is a constant fetch, so a placeholder item costs the
@@ -758,7 +757,12 @@ impl GpuCanvas {
                 }
             };
             batch.push(Instance {
-                rect: [v.screen_pos.x, v.screen_pos.y, v.screen_size.x, v.screen_size.y],
+                rect: [
+                    v.screen_pos.x,
+                    v.screen_pos.y,
+                    v.screen_size.x,
+                    v.screen_size.y,
+                ],
                 uv,
                 tint: [1.0, 1.0, 1.0, 1.0],
             });
@@ -814,7 +818,12 @@ impl GpuCanvas {
 /// The surface format is fixed rather than queried: `get_capabilities` lives on
 /// `Surface` in wgpu 27, and a headless pass has no surface. Hosts that do have
 /// one (iced, WGPUI) pass their own format into [`GpuCanvas::new`].
-pub fn headless_device() -> (wgpu::Device, wgpu::Queue, wgpu::TextureFormat, wgpu::AdapterInfo) {
+pub fn headless_device() -> (
+    wgpu::Device,
+    wgpu::Queue,
+    wgpu::TextureFormat,
+    wgpu::AdapterInfo,
+) {
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -823,16 +832,14 @@ pub fn headless_device() -> (wgpu::Device, wgpu::Queue, wgpu::TextureFormat, wgp
     }))
     .expect("no suitable GPU adapter found");
 
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("spike-device"),
-            // Downlevel webgl2 defaults are the floor SQU-60 committed to.
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                .using_resolution(adapter.limits()),
-            memory_hints: wgpu::MemoryHints::Performance,
-            ..Default::default()
-        },
-    ))
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("spike-device"),
+        // Downlevel webgl2 defaults are the floor SQU-60 committed to.
+        required_limits:
+            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+        memory_hints: wgpu::MemoryHints::Performance,
+        ..Default::default()
+    }))
     .expect("failed to create device");
 
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;

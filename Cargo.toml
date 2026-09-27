@@ -3,8 +3,10 @@ resolver = "2"
 members = [
     "crates/canvas-core",
     "crates/canvas-gpu",
+    "crates/canvas-app",
     "crates/canvas-harness",
     "crates/host-iced",
+    "crates/probe-surface",
 ]
 
 [workspace.package]
@@ -17,11 +19,11 @@ publish = false
 [workspace.dependencies]
 canvas-core = { path = "crates/canvas-core" }
 canvas-gpu = { path = "crates/canvas-gpu" }
+canvas-app = { path = "crates/canvas-app" }
 canvas-harness = { path = "crates/canvas-harness" }
 wgpu = "27"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
-rand = "0.8"
 
 [profile.dev]
 opt-level = 1

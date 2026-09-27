@@ -42,14 +42,19 @@ function Invoke-Scenario {
   }
   if ($kv.Count -eq 0) { throw "unparseable RESULT: $($line.Line)" }
 
+  # A renamed or dropped field used to read as $null and print as 0, which made a
+  # broken run look like a fast one. Fail loudly instead.
+  foreach ($required in 'mean_ms', 'p99_ms', 'max_ms', 'over', 'frames', 'placeholders_pct', 'peak_visible') {
+    if (-not $kv.ContainsKey($required)) { throw "RESULT is missing '$required': $($line.Line)" }
+  }
+
   $mean = [double]$kv['mean_ms']
   [pscustomobject]@{
     Scenario    = $Label
-    Visible     = [int]$kv['visible']
+    Visible     = [int]$kv['peak_visible']
     MeanMs      = [math]::Round($mean, 2)
     P99Ms       = [math]::Round([double]$kv['p99_ms'], 2)
     MaxMs       = [math]::Round([double]$kv['max_ms'], 2)
-    CpuMs       = [math]::Round([double]$kv['submit_ms'], 2)
     OverBudget  = "$($kv['over'])/$($kv['frames'])"
     Placeholder = "$($kv['placeholders_pct'])%"
     Budget      = if ($mean -le $BUDGET) { 'ok' } else { 'OVER' }
@@ -103,7 +108,4 @@ if ($over.Count) { Write-Host "$($over.Count) scenario(s) over budget." -Foregro
 else            { Write-Host 'All scenarios inside budget.' -ForegroundColor Green }
 if ($ph.Count)   { Write-Host "$($ph.Count) scenario(s) with placeholders: atlas too small for the visible set." -ForegroundColor Yellow }
 else            { Write-Host 'No placeholders: every visible item has a real texture.' -ForegroundColor Green }
-if (($results | Where-Object { $_.CpuMs -gt ($_.MeanMs * 0.7) }).Count -gt ($results.Count / 2)) {
-  Write-Host 'Mostly CPU-bound: cost is culling, instance build and texture upload, not the GPU.' -ForegroundColor DarkGray
-}
 Write-Host ''

@@ -258,7 +258,10 @@ impl SpatialGrid {
     }
 
     fn cell_of(&self, p: Vec2) -> (i32, i32) {
-        ((p.x / self.cell).floor() as i32, (p.y / self.cell).floor() as i32)
+        (
+            (p.x / self.cell).floor() as i32,
+            (p.y / self.cell).floor() as i32,
+        )
     }
 
     /// Items whose bounds intersect `query`, in stable insertion order.
@@ -307,7 +310,9 @@ pub fn cull(
     size: Vec2,
     margin_px: f32,
 ) -> Vec<VisibleItem> {
-    let world_rect = viewport.visible_rect(size).expand(margin_px / viewport.scale);
+    let world_rect = viewport
+        .visible_rect(size)
+        .expand(margin_px / viewport.scale);
     let mut out = Vec::new();
     for item in grid.query(&world_rect) {
         let top_left = viewport.world_to_screen(item.pos, size);
@@ -410,9 +415,19 @@ mod tests {
         grid.insert(item(1, 0.0, 0.0));
         grid.insert(item(1, 9_000.0, 9_000.0));
         assert_eq!(grid.len(), 1);
-        let hits = grid.query(&Rect::new(Vec2::new(8_900.0, 8_900.0), Vec2::new(9_500.0, 9_500.0)));
-        assert_eq!(hits.len(), 1, "item should only be findable at its new position");
-        let old = grid.query(&Rect::new(Vec2::new(-200.0, -200.0), Vec2::new(200.0, 200.0)));
+        let hits = grid.query(&Rect::new(
+            Vec2::new(8_900.0, 8_900.0),
+            Vec2::new(9_500.0, 9_500.0),
+        ));
+        assert_eq!(
+            hits.len(),
+            1,
+            "item should only be findable at its new position"
+        );
+        let old = grid.query(&Rect::new(
+            Vec2::new(-200.0, -200.0),
+            Vec2::new(200.0, 200.0),
+        ));
         assert_eq!(old.len(), 0, "stale cell membership must be removed");
     }
 
@@ -421,8 +436,16 @@ mod tests {
         assert_eq!(mip_for_screen_size(256.0), 0, "1:1 samples the base level");
         assert_eq!(mip_for_screen_size(128.0), 1);
         assert_eq!(mip_for_screen_size(4.0), 6, "clamps to the smallest level");
-        assert_eq!(mip_for_screen_size(100_000.0), 0, "clamps to the largest level");
-        assert_eq!(mip_for_screen_size(0.0), MIP_LEVELS - 1, "degenerate size is safe");
+        assert_eq!(
+            mip_for_screen_size(100_000.0),
+            0,
+            "clamps to the largest level"
+        );
+        assert_eq!(
+            mip_for_screen_size(0.0),
+            MIP_LEVELS - 1,
+            "degenerate size is safe"
+        );
     }
 
     #[test]
@@ -458,9 +481,18 @@ mod tests {
     #[test]
     fn cull_output_is_ordered_by_z_then_id() {
         let mut grid = SpatialGrid::new(1_000.0);
-        grid.insert(Item { z: 5, ..item(1, 0.0, 0.0) });
-        grid.insert(Item { z: 1, ..item(2, 10.0, 0.0) });
-        grid.insert(Item { z: 1, ..item(3, 20.0, 0.0) });
+        grid.insert(Item {
+            z: 5,
+            ..item(1, 0.0, 0.0)
+        });
+        grid.insert(Item {
+            z: 1,
+            ..item(2, 10.0, 0.0)
+        });
+        grid.insert(Item {
+            z: 1,
+            ..item(3, 20.0, 0.0)
+        });
         let view = Viewport::default();
         let visible = cull(&mut grid, &view, Vec2::new(800.0, 600.0), 0.0);
         let order: Vec<u32> = visible.iter().map(|v| v.id).collect();

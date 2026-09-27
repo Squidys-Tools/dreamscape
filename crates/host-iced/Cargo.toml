@@ -9,6 +9,16 @@ publish.workspace = true
 [dependencies]
 canvas-core.workspace = true
 canvas-gpu.workspace = true
-canvas-harness.workspace = true
-iced = { version = "0.13", features = ["wgpu", "tiny-skia"] }
+canvas-app.workspace = true
+# 0.14 specifically: 0.13 is on wgpu 0.19 and cannot share a device with the
+# canvas renderer, which is wgpu 27. See docs/spikes/canvas-spike.md.
+#
+# `advanced` exposes the low-level types the Shader widget needs, `lazy` gives
+# the Explorer a real virtual list.
+iced = { version = "0.14", features = ["advanced"] }
+iced_wgpu = "0.14"
 wgpu.workspace = true
+# iced_wgpu reports surface/swapchain problems through `log`. Without a logger
+# installed every one of those diagnostics is silently dropped, which makes a
+# non-rendering window look like a silent success.
+env_logger = "0.11"
