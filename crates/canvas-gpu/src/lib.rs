@@ -53,11 +53,20 @@ impl Default for AtlasConfig {
 
 #[derive(Clone, Copy, Debug)]
 struct Resident {
-    /// Atlas slot index per mip level.
-    slots: [u32; MIP_LEVELS as usize],
+    /// Atlas slot per mip level, allocated independently and lazily.
+    slots: [Option<u32>; MIP_LEVELS as usize],
     /// Frame this texture was last drawn with. Equal to `Atlas::frame` means pinned.
     last_used: u64,
     approx_bytes: u64,
+}
+
+impl Resident {
+    fn has_level(&self, level: u32) -> bool {
+        self.slots
+            .get(level as usize)
+            .map(|s| s.is_some())
+            .unwrap_or(false)
+    }
 }
 
 pub struct AtlasStats {
@@ -78,6 +87,11 @@ pub struct Atlas {
     per_row: [u32; MIP_LEVELS as usize],
     free: [Vec<u32>; MIP_LEVELS as usize],
     resident: HashMap<u32, Resident>,
+    /// Every key ever admitted, append-only. The eviction cursor indexes this.
+    /// Entries for evicted keys are dead weight but are skipped in O(1), and
+    /// compacting would cost more than it saves at realistic working-set sizes.
+    key_order: Vec<u32>,
+    evict_cursor: usize,
     frame: u64,
     uploads_this_frame: u32,
     evictions_total: u64,
@@ -189,6 +203,8 @@ impl Atlas {
             per_row,
             free,
             resident: HashMap::new(),
+            key_order: Vec::new(),
+            evict_cursor: 0,
             frame: 0,
             uploads_this_frame: 0,
             evictions_total: 0,
@@ -242,11 +258,139 @@ impl Atlas {
         self.resident.contains_key(&key)
     }
 
-    /// Make `key` resident, uploading any mip levels that are not already there.
+    pub fn has_level(&self, key: u32, level: u32) -> bool {
+        self.resident
+            .get(&key)
+            .map(|r| r.has_level(level))
+            .unwrap_or(false)
+    }
+
+    /// Nearest resident level at or coarser than `level`.
+    pub fn resolve_level(&self, key: u32, level: u32) -> Option<u32> {
+        let r = self.resident.get(&key)?;
+        if level >= MIP_LEVELS {
+            return None;
+        }
+        (level as usize..MIP_LEVELS as usize)
+            .find(|&l| r.slots[l].is_some())
+            .map(|l| l as u32)
+    }
+
+    /// Ensure that *some* level at or coarser than `preferred` is resident.
     ///
-    /// `levels[0]` is the full-resolution thumbnail. Returns false if the atlas
-    /// could not free enough space, in which case the caller should skip drawing
-    /// those items rather than sample garbage.
+    /// Tries `preferred` first, then progressively coarser levels. Coarser levels
+    /// occupy far less atlas space, so a board of many distinct images resolves
+    /// almost everything at a blurrier level rather than dropping it entirely.
+    ///
+    /// Returns the level that ended up resident, or `None` if even the coarsest
+    /// level could not be placed. Callers must check [`Atlas::resolve_level`]
+    /// before calling, otherwise they will re-upload the same level every frame.
+    pub fn ensure_view(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: u32,
+        preferred: u32,
+        levels: &[Vec<u8>],
+    ) -> Option<u32> {
+        if let Some(l) = self.resolve_level(key, preferred) {
+            if let Some(r) = self.resident.get_mut(&key) {
+                r.last_used = self.frame;
+            }
+            return Some(l);
+        }
+        if preferred >= MIP_LEVELS {
+            return None;
+        }
+        for level in preferred..MIP_LEVELS {
+            let Some(bytes) = levels.get(level as usize) else {
+                break;
+            };
+            if self.ensure_level(device, queue, key, level, bytes) {
+                return Some(level);
+            }
+            // Placement failed at this level. Trying coarser is not merely
+            // better, it is much cheaper: a 64px level needs 16x less space than
+            // a 256px one, so the coarse levels have orders of magnitude more room.
+        }
+        None
+    }
+
+    /// Make one mip level of `key` resident, uploading it if needed.
+    ///
+    /// Levels are allocated independently and on demand. This is the whole
+    /// point: the fine levels are the scarce resource, and a texture that cannot
+    /// fit at 256px must still be admitted at 8px where there is ample room.
+    /// Allocating a whole pyramid up front rejects the entire texture when any
+    /// single level is oversubscribed, which is the common case on a board of
+    /// distinct images.
+    pub fn ensure_level(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: u32,
+        level: u32,
+        rgba: &[u8],
+    ) -> bool {
+        if level >= MIP_LEVELS {
+            return false;
+        }
+        let px = mip_size(level);
+        let want = (px * px * 4) as usize;
+        if rgba.len() < want {
+            return false;
+        }
+
+        let frame = self.frame;
+        if let Some(r) = self.resident.get_mut(&key) {
+            r.last_used = frame;
+            if r.has_level(level) {
+                return true;
+            }
+        }
+
+        let Some(slot) = self.take_slot(level) else {
+            return false;
+        };
+        let (ox, oy) = self_origin(px, self.per_row[level as usize], slot);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: ox, y: oy, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba[..want],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(px * 4),
+                rows_per_image: Some(px),
+            },
+            wgpu::Extent3d {
+                width: px,
+                height: px,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.uploads_this_frame += 1;
+
+        let entry = self.resident.entry(key).or_insert_with(|| {
+            self.key_order.push(key);
+            Resident {
+                slots: [None; MIP_LEVELS as usize],
+                last_used: frame,
+                approx_bytes: 0,
+            }
+        });
+        entry.last_used = frame;
+        entry.slots[level as usize] = Some(slot);
+        entry.approx_bytes += want as u64;
+        let _ = device;
+        true
+    }
+
+    /// Eagerly upload every level provided. Kept for tests and for the case
+    /// where a full pyramid genuinely is wanted, such as an export path.
     pub fn ensure_resident(
         &mut self,
         device: &wgpu::Device,
@@ -260,79 +404,18 @@ impl Atlas {
             }
             return true;
         }
-        if levels.is_empty() {
-            return false;
-        }
-
-        let mut slots = [0u32; MIP_LEVELS as usize];
-        let mut approx_bytes = 0u64;
-        // (mip level, slot) pairs taken so far, so a partial allocation can be undone.
-        let mut allocated: Vec<(usize, u32)> = Vec::new();
-
+        let mut any = false;
         for (level, bytes) in levels.iter().enumerate().take(MIP_LEVELS as usize) {
-            let px = mip_size(level as u32);
-            let want = (px * px * 4) as usize;
-            if bytes.len() < want {
-                // Tolerate short buffers by padding, so a generator bug shows up
-                // as a wrong-looking image rather than a panic mid-frame.
-                break;
+            if self.ensure_level(device, queue, key, level as u32, bytes) {
+                any = true;
             }
-            let Some(slot) = self.take_slot(level as u32) else {
-                // Roll back: a half-resident texture is worse than an absent one.
-                for (l, s) in allocated {
-                    self.free[l].push(s);
-                }
-                return false;
-            };
-            slots[level] = slot;
-            allocated.push((level, slot));
-            approx_bytes += want as u64;
         }
-        if allocated.is_empty() {
-            return false;
+        if !any {
+            self.resident.remove(&key);
         }
-
-        for (level, slot) in &allocated {
-            let px = mip_size(*level as u32);
-            let data = &levels[*level];
-            let (ox, oy) = self_origin(px, self.per_row[*level], *slot);
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: ox,
-                        y: oy,
-                        z: 0,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &data[..(px * px * 4) as usize],
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(px * 4),
-                    rows_per_image: Some(px),
-                },
-                wgpu::Extent3d {
-                    width: px,
-                    height: px,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-        self.uploads_this_frame += allocated.len() as u32;
-
-        self.resident.insert(
-            key,
-            Resident {
-                slots,
-                last_used: self.frame,
-                approx_bytes,
-            },
-        );
-        let _ = device;
-        true
+        any
     }
+
 
     /// Zero-area uv aimed at the single placeholder texel at the atlas origin.
     ///
@@ -353,13 +436,22 @@ impl Atlas {
 
     /// UV rect for one mip of a resident texture, inset by half a texel so
     /// linear filtering cannot reach into the neighbouring slot.
+    ///
+    /// If the exact level is not resident, falls back to the nearest *coarser*
+    /// level that is. That is the normal degradation path: the fine levels are
+    /// the scarce resource, so an item that cannot get a sharp copy gets a
+    /// blurrier one rather than a grey box. A coarser level stretched to the
+    /// same on-screen size is blurry, never distorted, which is what mipmapping
+    /// already does.
     pub fn uv_rect(&self, key: u32, level: u32) -> Option<[f32; 4]> {
         let r = self.resident.get(&key)?;
         if level >= MIP_LEVELS {
             return None;
         }
-        let px = mip_size(level);
-        let (ox, oy) = self.slot_origin(level, r.slots[level as usize]);
+        let used = (level as usize..MIP_LEVELS as usize).find(|&l| r.slots[l].is_some())?;
+        let slot = r.slots[used]?;
+        let px = mip_size(used as u32);
+        let (ox, oy) = self.slot_origin(used as u32, slot);
         let inv = 1.0 / self.config.size as f32;
         let half = 0.5 * inv;
         Some([
@@ -370,25 +462,45 @@ impl Atlas {
         ])
     }
 
+    /// Evict a texture to free one slot at `level`.
+    ///
+    /// Uses a rotating cursor over the append-only key list rather than a
+    /// `min_by_key` over the residency map. The latter is a full O(n) scan with
+    /// no early exit, so a board of many distinct images spends the entire
+    /// frame inside eviction. The cursor finds an unpinned victim in a bounded
+    /// number of steps in practice because it resumes where it left off.
     fn take_slot(&mut self, level: u32) -> Option<u32> {
         if let Some(slot) = self.free[level as usize].pop() {
             return Some(slot);
         }
-        // Evict the least recently used texture that is not on screen.
         let frame = self.frame;
-        let victim = self
-            .resident
-            .iter()
-            .filter(|(_, r)| r.last_used < frame)
-            .min_by_key(|(_, r)| r.last_used)
-            .map(|(k, _)| *k)?;
+        let n = self.key_order.len();
+        for step in 0..n {
+            let idx = (self.evict_cursor + step) % n.max(1);
+            let Some(&key) = self.key_order.get(idx) else {
+                continue;
+            };
+            let Some(r) = self.resident.get(&key) else {
+                // Key was evicted long ago; keep advancing.
+                continue;
+            };
+            if r.last_used >= frame {
+                continue; // On screen this frame. Never evictable.
+            }
+            self.evict_cursor = (idx + 1) % n.max(1);
 
-        let victim_entry = self.resident.remove(&victim)?;
-        for (level, slot) in victim_entry.slots.iter().enumerate() {
-            self.free[level].push(*slot);
+            let victim_entry = self.resident.remove(&key)?;
+            for (lvl, slot) in victim_entry.slots.iter().enumerate() {
+                if let Some(s) = slot {
+                    self.free[lvl].push(*s);
+                }
+            }
+            self.evictions_total += 1;
+            return self.free[level as usize].pop();
         }
-        self.evictions_total += 1;
-        self.free[level as usize].pop()
+        // Everything resident is on screen. Refusing to thrash is correct: the
+        // caller falls back to a coarser level or a placeholder.
+        None
     }
 }
 
@@ -606,12 +718,17 @@ impl GpuCanvas {
         self.atlas.begin_frame();
     }
 
-    /// Items whose texture is not resident, deduplicated.
-    pub fn missing_textures(visible: &[VisibleItem]) -> Vec<u32> {
+    /// Distinct texture keys among the visible set, sorted and deduplicated.
+    pub fn visible_keys(visible: &[VisibleItem]) -> Vec<u32> {
         let mut keys: Vec<u32> = visible.iter().map(|v| v.tex).collect();
         keys.sort_unstable();
         keys.dedup();
         keys
+    }
+
+    /// Items whose texture is not resident, deduplicated.
+    pub fn missing_textures(visible: &[VisibleItem]) -> Vec<u32> {
+        Self::visible_keys(visible)
     }
 
     /// Build instances and issue a single instanced draw.

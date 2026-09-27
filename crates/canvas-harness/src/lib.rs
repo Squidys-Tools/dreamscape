@@ -245,6 +245,45 @@ impl Metrics {
         );
         out
     }
+
+    /// Single-line `key=value` summary for scripts to consume.
+    ///
+    /// The human-facing report above is formatted for reading and is not a
+    /// stable interface; this is.
+    pub fn machine_line(&self, peak_visible: u32) -> String {
+        let submit: Vec<f64> = self
+            .samples
+            .iter()
+            .map(|s| s.submit.as_secs_f64() * 1000.0)
+            .collect();
+        let serial: Vec<f64> = self
+            .samples
+            .iter()
+            .map(|s| s.serial.as_secs_f64() * 1000.0)
+            .collect();
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+        let over = serial.iter().filter(|&&x| x > 16.67).count();
+        let ph: u32 = self.samples.iter().map(|s| s.placeholder).sum();
+        let vis: u32 = self.samples.iter().map(|s| s.visible).sum();
+        let ph_pct = 100.0 * ph as f64 / vis.max(1) as f64;
+        let last = self.samples.last().copied().unwrap_or_default();
+
+        format!(
+            "RESULT frames={} mean_ms={:.3} p99_ms={:.3} max_ms={:.3} \
+             submit_ms={:.3} over={} placeholders_pct={:.2} visible={} \
+             uploads={} evictions={}",
+            self.samples.len(),
+            mean(&serial),
+            Self::percentile_ms(&serial, 0.99),
+            Self::percentile_ms(&serial, 1.0),
+            mean(&submit),
+            over,
+            ph_pct,
+            peak_visible,
+            last.uploads,
+            last.evictions,
+        )
+    }
 }
 
 pub struct RunConfig {
@@ -338,20 +377,29 @@ pub fn run(cfg: &RunConfig) -> RunReport {
         let t0 = std::time::Instant::now();
 
         let visible = canvas_core::cull(&mut scene.grid, &scene.viewport, size, 192.0);
-        let keys = GpuCanvas::missing_textures(&visible);
 
         // Pin before ingesting, not after. Otherwise ingesting one newly visible
         // texture can evict another that is already on screen this frame but has
         // not been visited by the loop yet, which shows up as a hole in the board.
-        canvas.atlas_mut().pin(&keys);
+        canvas.atlas_mut().pin(&GpuCanvas::visible_keys(&visible));
 
-        for key in &keys {
-            canvas.atlas_mut().ensure_resident(
-                &device,
-                &queue,
-                *key,
-                &sources[*key as usize % sources.len()].levels,
-            );
+        // Request only the level each item is actually being drawn at, and only
+        // when it does not already have *some* usable level. Allocating a whole
+        // pyramid up front rejects a texture outright when the fine levels are
+        // oversubscribed; and re-requesting a level that can never be placed
+        // re-uploads it every frame, which is far more expensive than the upload.
+        let mut wanted: Vec<(u32, u32)> = visible.iter().map(|v| (v.tex, v.mip)).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+
+        for (key, level) in wanted {
+            if canvas.atlas().resolve_level(key, level).is_some() {
+                continue;
+            }
+            let src = &sources[key as usize % sources.len()];
+            canvas
+                .atlas_mut()
+                .ensure_view(&device, &queue, key, level, &src.levels);
         }
 
         let mut enc =

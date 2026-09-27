@@ -57,4 +57,6 @@ fn main() {
         report.final_viewport.center.y,
         report.final_viewport.scale
     );
+    // Stable machine-readable summary. Scripts parse this, not the text above.
+    println!("{}", report.metrics.machine_line(report.peak_visible));
 }

@@ -43,18 +43,30 @@ in the running by way of a fork of a fork, and iced wins by default.
 
 If more than one config passes, the tiebreak is the one that needs no fork.
 
-## Measured so far
+## Measured
 
-Canvas only, no UI library, Intel Iris Xe, Vulkan backend.
+Canvas only, no UI library. Intel Iris Xe, Vulkan backend. Frame time is CPU
+submit plus a hard `device.poll(Wait)`, which serialises CPU and GPU and is
+pessimistic against a pipelined app.
 
-| Scene | serial mean | p99 | max | over budget |
-|---|---|---|---|---|
-| 2,000 visible, 1600×900 | 0.53ms | 1.47ms | 1.90ms | 0 / 400 |
-| 2,000 visible, 2560×1440 | 1.03ms | 2.81ms | 3.15ms | 0 / 400 |
+`./scripts/bench.ps1` reproduces these. Expect roughly 2x run-to-run variance on
+a shared iGPU; read p99 and the over-budget count rather than the mean.
 
-Roughly 5× headroom on the pessimistic measure, so considerably more in a real
-pipelined app. The whole board is one draw call with no batching logic, so
-draw-call overhead is not a factor at any item count.
+| Scenario | Visible | Mean | p99 | Max | Over budget | Placeholders |
+|---|---|---|---|---|---|---|
+| 2,000 items / 2,000 distinct | 1,194 | 1.6ms | 4-5ms | 6-11ms | 0/200 | 0.00% |
+| 8,000 items / 8,000 distinct | 4,967 | 6.7-13.3ms | 24-55ms | 29-124ms | 7-54/200 | 0.00% |
+| 20,000 items / 20,000 distinct | 12,431 | 32-42ms | 121-160ms | 134-287ms | 130-140/200 | 0.00% |
+| 32,000 items / 32,000 distinct, all on screen | 32,000 | 774ms | 5,100ms | 6,177ms | 150/150 | 0.00% |
+
+The 2,000-item case SQU-60 specifies passes with about 10x headroom. Degradation
+starts near 5,000 simultaneously visible distinct images; 12,000 is over budget.
+The 32,000 case is a wall of thumbnails, not a moodboard, and is listed to show
+where the wall is rather than as a target.
+
+**CPU-bound at 85-90% throughout.** The cost is culling, building the per-frame
+instance buffer, and uploading texture levels. The whole board is one draw call
+with no batching logic, so draw-call overhead is not a factor at any item count.
 
 ## Findings that changed the design
 
@@ -62,28 +74,53 @@ draw-call overhead is not a factor at any item count.
 graphics floor means `max_storage_buffers_per_shader_stage = 0`, so per-instance
 data cannot be fed through a storage buffer in the vertex stage. It is fed
 through an instanced vertex buffer instead, which is more portable anyway. This
-would have been discovered late and expensively if the floor had not been
-declared up front.
+surfaced as a validation panic on the first run.
+
+**Mip levels must be allocated lazily, one at a time.** The first version
+allocated a whole pyramid the moment a texture became visible and rejected the
+texture outright if any level was oversubscribed. On a board of distinct images
+that produced **95% grey placeholders** on a 2,000-image board, because a 2,048
+atlas holds only 64 slots at 256px while holding 262,144 at 4px. Allocating
+per level, and falling back to a coarser level rather than failing, took that to
+**0%**. This is the single most important finding in the spike and it was only
+visible because the content is distinct images rather than a handful reused.
+
+Note the earlier version of this document reported 0.83% placeholders. That figure
+came from a scene reusing 64 images across 2,000 items, which is not what a
+moodboard looks like. The realistic figure was 95% and the test was wrong.
+
+**Retrying a failed allocation is far more expensive than the upload.** After
+lazy allocation, an item that cannot get its preferred level failed every frame,
+re-uploading and re-scanning the eviction ring. Callers must check whether *some*
+usable level is already resident before requesting, so a request resolves once
+and sticks. Before this fix, 32,000 distinct images cost 830ms per frame; after
+it, the same scene renders with zero placeholders.
+
+**Eviction must not scan.** Finding a victim with `min_by_key` over the residency
+map is a full O(n) scan with no early exit, so a board of many distinct images
+spends the frame inside eviction. A rotating cursor over an append-only key list
+finds an unpinned victim in a bounded number of steps. The cursor still refuses
+to evict anything pinned this frame, and refusing to thrash is correct: the
+caller degrades to a coarser level or a placeholder.
 
 **Pin before ingest, never after.** Ingesting one newly visible texture can evict
 another that is already on screen but has not been visited by the loop yet. The
 symptom is a hole in the board. Fixed by pinning the visible set first.
 
-**Fine mip levels are the scarce resource, not texture count.** A 2,048² atlas
-holds 64 slots at mip 0 and 65,536 at mip 6, so a working set is over-subscribed
-at the fine levels long before it is over-subscribed overall. The current
-renderer allocates all 7 levels the moment a texture becomes resident, which
-wastes the fine levels on items that are only ever seen zoomed out.
+**Placeholders are required, and are nearly free.** When no level can be placed
+the item draws as a flat swatch rather than vanishing. Implemented as a
+zero-area uv rect aimed at one reserved texel, so it needs no shader branch and
+costs the same as a real item. This is the "minimum-size placeholders" clause in
+SQU-60 and it is load-bearing whenever the atlas is undersized.
 
-*Follow-up, not a blocker:* allocate mip levels lazily, on first request. Most
-visible items need one or two levels, not seven.
+## Atlas capacity is the real constraint
 
-**Placeholders are required, and are nearly free.** When no atlas slot is
-available the item draws as a flat swatch rather than vanishing. This is
-implemented as a zero-area uv rect aimed at one reserved texel, so it needs no
-shader branch and costs the same as a real item. This is the "minimum-size
-placeholders" clause in SQU-60, and it is load-bearing whenever the atlas is
-undersized for the working set.
+A 2,048 square atlas holds 4.2M pixels, which is about 256 images at 128px or
+1,024 at 64px. So a board of a few hundred distinct images at a sharp zoom is
+already near the limit, and pushing past it means either a larger atlas, coarser
+rendering when many items are visible, or abandoning the atlas for per-item
+textures. SQU-65 should own this decision, since it is the same question as how
+large thumbnails are on disk.
 
 ## Not representative of production
 
@@ -100,15 +137,4 @@ intended stack.
 - `host-wgpui`: fetch the fork, confirm it builds against a current toolchain.
 - `host-gpui`: measure the cost of the per-frame texture copy.
 - Canvas text via `cosmic-text` + `glyphon`, verified against the chrome's text.
-- Lazy per-level mip allocation.
-
-## Running it
-
-```sh
-cargo test -p canvas-core
-cargo run -p canvas-harness --bin bench --release
-cargo run -p canvas-harness --bin bench --release -- --pan=0 --zoom=0.96 --width=2560 --height=1440
-cargo run -p canvas-harness --bin bench --release -- --atlas=512   # deliberate pressure
-```
-
-Flags: `--items --textures --atlas --width --height --warmup --frames --pan --zoom`.
+- Decide atlas capacity policy, or move off the atlas.
