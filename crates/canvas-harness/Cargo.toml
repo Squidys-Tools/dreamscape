@@ -1,0 +1,18 @@
+[package]
+name = "canvas-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+canvas-core.workspace = true
+canvas-gpu.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+rand.workspace = true
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
