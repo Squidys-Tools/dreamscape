@@ -98,7 +98,8 @@ The common defect here is a change that works on the path you tested and is miss
 - Rust 1.92, pinned as `rust-version` in the workspace `Cargo.toml`. `cargo` is the only build tool for the Rust side.
 - `wasm32-unknown-unknown` is already installed. No `rustup target add` needed.
 - **bun for all JavaScript work.** Not npm, not yarn, not pnpm. bun 1.4.2 is on PATH.
-- `just` is not installed, so nothing may invoke it. Project commands are registered in `dreamscape.json` at the repo root, and that is what the T3 Code scripts menu runs.
+- `just` is not installed, so nothing may invoke it. Project commands are registered in `t3.json` at the repo root, and that is what the T3 Code scripts menu runs.
+- **The manifest filename is not ours to choose.** T3 Code hard-codes `t3.json` and silently ignores any other name, so do not rename it to `dreamscape.json` or anything else. Verified against the installed bundle: the lookup passes the literal `t3.json`, and the invalid-manifest message is hard-coded to that name too. The repo can have a different name than the file.
 - Cargo and bun share no root manifest, so build order across the two ecosystems is orchestrated explicitly rather than by a root task runner.
 - Never start a windowed binary and then immediately assert what it drew. See the known-broken list.
 

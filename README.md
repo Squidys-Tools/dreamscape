@@ -44,13 +44,13 @@ cargo run -p host-iced --release                   # opens a window, draws nothi
 
 Expect roughly 2x run-to-run variance on a shared integrated GPU. Read the p99 and the over-budget count, not the mean alone.
 
-The T3 Code scripts menu runs the same commands, registered in `dreamscape.json`.
+The T3 Code scripts menu runs the same commands, registered in `t3.json`.
 
 **Start here:**
 
 - [`AGENTS.md`](AGENTS.md) - what must not be compromised, the glossary, and how to work in this repo
 - [`docs/spikes/canvas-spike.md`](docs/spikes/canvas-spike.md) - the design, the findings that forced it, and every measurement with the command that produced it
-- [`dreamscape.json`](dreamscape.json) - project commands for the T3 Code scripts menu
+- [`t3.json`](t3.json) - project commands for the T3 Code scripts menu
 
 There is no `docs/` hierarchy and no changelog yet, on purpose. A spike with one internals document does not need them.
 
