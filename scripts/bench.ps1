@@ -57,7 +57,10 @@ function Invoke-Scenario {
     MaxMs       = [math]::Round([double]$kv['max_ms'], 2)
     OverBudget  = "$($kv['over'])/$($kv['frames'])"
     Placeholder = "$($kv['placeholders_pct'])%"
-    Budget      = if ($mean -le $BUDGET) { 'ok' } else { 'OVER' }
+    # The decision rule is zero frames over budget, not a mean under budget.
+    # Testing the mean here reported 20k items as 'ok' while a third of its
+    # frames were over the threshold.
+    Budget      = if ([int]$kv['over'] -eq 0) { 'ok' } else { 'OVER' }
   }
 }
 
@@ -104,8 +107,8 @@ $over = @($results | Where-Object { $_.Budget -eq 'OVER' })
 $ph   = @($results | Where-Object { [double]($_.Placeholder -replace '%','') -gt 0.01 })
 
 Write-Host ''
-if ($over.Count) { Write-Host "$($over.Count) scenario(s) over budget." -ForegroundColor Yellow }
-else            { Write-Host 'All scenarios inside budget.' -ForegroundColor Green }
+if ($over.Count) { Write-Host "$($over.Count) scenario(s) over budget:" -ForegroundColor Yellow; $over | ForEach-Object { Write-Host "  $($_.Scenario)  $($_.OverBudget) frames" -ForegroundColor Yellow } }
+else            { Write-Host 'No frames over budget in any scenario.' -ForegroundColor Green }
 if ($ph.Count)   { Write-Host "$($ph.Count) scenario(s) with placeholders: atlas too small for the visible set." -ForegroundColor Yellow }
 else            { Write-Host 'No placeholders: every visible item has a real texture.' -ForegroundColor Green }
 Write-Host ''

@@ -29,6 +29,7 @@ fn main() {
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
                 debug_slots: false,
             },
+            extent: arg("extent", "1000").parse().unwrap(),
             motion: Motion {
                 pan_x: arg("pan", "18.0").parse().unwrap(),
                 pan_y: arg("pan", "18.0").parse::<f32>().unwrap() * 0.35,
@@ -42,7 +43,7 @@ fn main() {
         frames: arg("frames", "200").parse().unwrap(),
     };
 
-    println!("dreamscape canvas spike — headless");
+    println!("dreamscape canvas spike - headless");
     println!(
         "  scene      {} items, {} distinct images, {}x{}, atlas {}",
         cfg.app.items, cfg.app.textures, cfg.width, cfg.height, cfg.app.atlas.size

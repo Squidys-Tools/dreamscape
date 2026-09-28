@@ -54,35 +54,49 @@ pessimistic against a pipelined app.
 `./scripts/bench.ps1` reproduces these. Expect roughly 2x run-to-run variance on
 a shared iGPU; read p99 and the over-budget count rather than the mean.
 
+Every scenario below is a **full board**: all items on screen at once. That is
+the case SQU-60 specifies, and until recently it was not what was being measured.
+
 | Scenario | Peak visible | Mean | p99 | Max | Over budget | Placeholders |
 |---|---|---|---|---|---|---|
-| 2,000 items / 2,000 distinct | 374 | 0.4ms | 0.7-0.8ms | 1.2ms | 0/200 | 0.00% |
-| 8,000 items / 8,000 distinct | 1,558 | 0.9-1.6ms | 1.7-4.7ms | 2.9-4.7ms | 0/200 | 0.00% |
-| 20,000 items / 20,000 distinct | 3,927 | 3.8-4.6ms | 7.4-7.9ms | 9.4ms | 0/200 | 0.00% |
-| 32,000 items / 32,000 distinct | 6,270 | 10.7ms | 22.2ms | 23.4ms | 22/200 | 0.00% |
+| 2,000 items / 2,000 distinct | 2,000 | 1.2-1.3ms | 2.3ms | 2.5-3.5ms | 0/200 | 0.00% |
+| 8,000 items / 8,000 distinct | 8,000 | 4.5-4.6ms | 9.5-10.2ms | 10.9-13.3ms | 0/200 | 0.00% |
+| 20,000 items / 20,000 distinct | 20,000 | 12.2-13.1ms | 26.3-27.4ms | 30.8-34.3ms | 49-69/200 | 0.00% |
+| 32,000 items / 32,000 distinct | 32,000 | 23.4ms | 44.7ms | 58.2ms | 169/200 | 0.00% |
 
 The whole board is one draw call with no batching logic, so draw-call overhead is
 not a factor at any item count.
 
-### The scene is too sparse to answer SQU-60
+**The wall is between 8,000 and 20,000 visible items.** The 2,000-item case that
+SQU-60 asks about passes with roughly 10x headroom, which is the headline result
+and it is now a real measurement rather than a proxy. 20,000 is over budget on
+between a quarter and a third of frames, and 32,000 is over on most of them.
 
-**Read the visible column before believing any of these numbers.** Only about 5%
-of items are on screen: 374 of 2,000, 3,927 of 20,000. `Config::extent` is
-12,000, so items are scattered over a 24,000 x 24,000 world area, while at
-`start_scale` 0.35 a 2560x1440 viewport covers only 7,314 x 4,114 of it. The
-measured area ratio, 5.2%, matches the observed visible fraction exactly.
+### Getting the board dense is what exposed the real constraint
 
-That means the headline case in SQU-60 — "2,000 items, all visible" — is **not
-currently being measured**. What is measured is a 374-item board. The
-correspondingly reassuring frame times say very little about a board that is
-actually full.
+`Config::extent` was 12,000, which scattered items across a 24,000-square world
+area while the viewport covers about 7,300 of it. Only 5% of items were ever on
+screen, and the 2,000-item scenario rendered 374 while reporting a healthy
+0.4ms. The number was real and the claim was worthless. It is now 1,000, which
+puts every item in view.
 
-An earlier revision of this document reported 1,194 visible of 2,000 and 20,000
-items at 32-42ms and over budget. Those figures are not reproducible from the
-current code and have been removed rather than adjusted. Re-tuning `extent` to
-make the board dense is a change to the measured configuration and belongs with
-SQU-60, not in a cleanup commit; until it happens, treat every row above as
-"a sparse board" rather than "a moodboard".
+That fix immediately produced a second finding, and it is the one that matters
+for the atlas. **A board full of 2,000 distinct images reports 0% placeholders
+and the metric is nearly meaningless.** The atlas is partitioned by mip level,
+so a 2,048 atlas holds only 256 slots at 128px. The rest fall back to 64px and
+then 32px, which is exactly the degradation the design intends, and the
+placeholder count stays at zero because nothing ever fails outright.
+
+Measured: a 2,048 atlas and an 8,192 atlas produce identical frame times,
+identical over-budget counts and identical 0% placeholders. Tripling the atlas
+changes nothing the harness can see. So most of a 2,000-item board is being
+drawn substantially blurrier than its on-screen size warrants, and the current
+metrics are blind to it.
+
+The harness has no metric for "got the mip level its screen size asked for",
+which is the one that would show this. Adding it is the obvious next thing, and
+until it exists **0% placeholders should be read as "nothing failed", not as
+"everything looks right"**.
 
 ### The CPU/GPU split is no longer measured
 
@@ -107,7 +121,7 @@ presented frame 1 / 2 / 3 / 60 / 120 / 180
 ```
 
 `present()` returns `Ok` on every frame, the surface configures cleanly,
-`VK_KHR_swapchain` is present, and wgpu logs no error — and the window client
+`VK_KHR_swapchain` is present, and wgpu logs no error - and the window client
 area stays white. Confirmed while the window was explicitly foregrounded, and
 confirmed again in a full-desktop capture where other GPU-composited windows
 render normally, so it is not a screenshot artefact. Headless wgpu renders
@@ -171,11 +185,18 @@ SQU-60 and it is load-bearing whenever the atlas is undersized.
 ## Atlas capacity is the real constraint
 
 A 2,048 square atlas holds 4.2M pixels, which is about 256 images at 128px or
-1,024 at 64px. So a board of a few hundred distinct images at a sharp zoom is
-already near the limit, and pushing past it means either a larger atlas, coarser
-rendering when many items are visible, or abandoning the atlas for per-item
-textures. SQU-65 should own this decision, since it is the same question as how
-large thumbnails are on disk.
+1,024 at 64px. The atlas is partitioned by mip level, so those budgets do not
+pool: overflow at one level falls back to the next rather than borrowing space.
+
+That makes the arithmetic unforgiving at full density. A board of 2,000 items
+wants roughly 2,000 x 128px, or 33M pixels, against an atlas of 4.2M. It cannot
+fit, and the fallback is the designed behaviour, so the board renders rather
+than failing. See **Getting the board dense is what exposed the real
+constraint** for what that costs and why no current metric sees it.
+
+Pushing past this means a larger atlas, coarser rendering when many items are
+visible, or abandoning the atlas for per-item textures. SQU-65 should own that
+decision, since it is the same question as how large thumbnails are on disk.
 
 ## Not representative of production
 
@@ -188,9 +209,9 @@ intended stack.
 
 ## Still to do
 
-- Re-tune `Config::extent` so the board is dense enough to test the "2,000
-  items, all visible" case, then re-measure. Everything in **Measured** is
-  provisional until that happens.
+- Add a metric for "got the mip level its screen size asked for". The atlas is
+  partitioned by level, so overflow degrades quietly and the placeholder count
+  cannot see it.
 - Restore a GPU-vs-CPU split if any decision depends on which side is the
   bottleneck.
 - `host-iced`: written, shares one wgpu device with the canvas, and has never

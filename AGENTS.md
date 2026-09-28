@@ -16,9 +16,11 @@ Watch for: quoting a figure from an earlier run, averaging across two different 
 
 ### 2. Measure the case, not a proxy for it
 
-The scene is generated, which means it can be generated wrong, and the benchmark will happily report a beautiful number for an empty board. `Config::extent` is 12,000, which scatters items across a 24,000-square world area while a 2560x1440 viewport covers about 7,300 of it. Only 5% of items were ever on screen. The 2,000-item scenario rendered 374 items in 0.4ms. The number was real and the claim was worthless.
+The scene is generated, which means it can be generated wrong, and the benchmark will happily report a beautiful number for an empty board. `Config::extent` was 12,000, which scattered items across a 24,000-square world area while a 2560x1440 viewport covers about 7,300 of it. Only 5% of items were ever on screen, so the 2,000-item scenario rendered 374 items in 0.4ms. The number was real and the claim was worthless.
 
-The same trap in other forms: a still frame is not a pan, CPU submit is not frame time, headless is not windowed, and "visible" is not the same as "distinct textures".
+The same trap has a quieter form. A full board of 2,000 distinct images reports 0% placeholders, because the atlas is partitioned by mip level and overflow degrades to a coarser level instead of failing. An 8,192 atlas and a 2,048 atlas measure identically. So "0% placeholders" means "nothing failed", not "everything looks right", and the harness has no metric that tells the difference yet.
+
+Also: a still frame is not a pan, CPU submit is not frame time, and headless is not windowed.
 
 ### 3. Never quietly change what a metric means
 
@@ -96,7 +98,7 @@ The common defect here is a change that works on the path you tested and is miss
 - Rust 1.92, pinned as `rust-version` in the workspace `Cargo.toml`. `cargo` is the only build tool for the Rust side.
 - `wasm32-unknown-unknown` is already installed. No `rustup target add` needed.
 - **bun for all JavaScript work.** Not npm, not yarn, not pnpm. bun 1.4.2 is on PATH.
-- `just` is not installed, so nothing may invoke it. Project commands are registered in `t3.json` at the repo root, and that is what the T3 Code scripts menu runs.
+- `just` is not installed, so nothing may invoke it. Project commands are registered in `dreamscape.json` at the repo root, and that is what the T3 Code scripts menu runs.
 - Cargo and bun share no root manifest, so build order across the two ecosystems is orchestrated explicitly rather than by a root task runner.
 - Never start a windowed binary and then immediately assert what it drew. See the known-broken list.
 
@@ -149,10 +151,10 @@ Full reasoning, and the findings that shaped it, in `docs/spikes/canvas-spike.md
 
 ## Known broken
 
-Recorded so nobody re-derives the failure. Both are tracked in Linear.
+Recorded so nobody re-derives the failure. Tracked in Linear.
 
 - **`cargo run -p host-iced` opens a window and never draws.** SQU-73. This is a machine-level presentation failure, not a bug in the host. A raw winit plus wgpu probe presents 180+ frames with `present()` returning `Ok` and no wgpu errors, and the client area still shows nothing. Confirmed while foregrounded, and in a full-desktop capture where other GPU-composited windows render normally.
-- **The benchmark board is too sparse to test the case SQU-60 specifies.** Only about 5% of items are on screen, so the 2,000-item scenario renders 374. SQU-84. Until it is fixed, read the visible count before believing any frame time.
+- **Nothing measures mip degradation.** A dense board of distinct images hits the atlas ceiling by falling back to coarser levels, and every metric stays clean. A 2,048 atlas and an 8,192 atlas are indistinguishable to the harness. Read 0% placeholders as "nothing failed".
 
 ## Taste
 

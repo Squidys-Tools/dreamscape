@@ -135,6 +135,19 @@ pub struct Config {
     pub items: u32,
     pub textures: u32,
     pub atlas: canvas_gpu::AtlasConfig,
+    /// Half-extent of the world area items are scattered across, in world units.
+    ///
+    /// This is the knob that decides how dense a board is, and it is the one
+    /// that was badly wrong before. At 12,000 the items spread over a
+    /// 24,000-square area while a 2560x1440 viewport at `start_scale` covers
+    /// about 7,300 of it, so only 5% of them were ever on screen and the
+    /// benchmark was measuring a nearly empty board while reporting healthy
+    /// frame times.
+    ///
+    /// At 1,000 every scenario is a full board, so the sweep answers the
+    /// question that matters: at what item count does a full board break?
+    /// Anything larger spreads the items out and quietly returns to measuring
+    /// an empty one.
     pub extent: f32,
     pub seed: u64,
     pub start_scale: f32,
@@ -147,7 +160,7 @@ impl Default for Config {
             items: 2_000,
             textures: 2_000,
             atlas: canvas_gpu::AtlasConfig::default(),
-            extent: 12_000.0,
+            extent: 1_000.0,
             seed: 0x5EED,
             start_scale: 0.35,
             motion: Motion::default(),

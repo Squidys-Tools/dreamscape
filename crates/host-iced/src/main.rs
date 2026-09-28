@@ -186,7 +186,7 @@ fn main() -> iced::Result {
     // makes a window that never draws look like a silent success.
     env_logger::init();
     iced::application::<App, Msg, Theme, iced_wgpu::Renderer>(App::new, App::update, App::view)
-        .title("dreamscape spike — host-iced")
+        .title("dreamscape spike - host-iced")
         .antialiasing(true)
         .run()
 }
