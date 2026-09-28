@@ -2,3 +2,6 @@
 **/*.rs.bk
 /perf-*.txt
 /perf-*.json
+# bench.ps1 -ResultLog writes its capture wherever it is pointed, and the
+# documented invocation points it at the repo root.
+/bench*.txt
