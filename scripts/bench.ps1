@@ -16,10 +16,17 @@
   quick  one fast scenario
   bench  (default) realistic zoomed views at 2k / 8k / 20k distinct images
   scale  item counts doubled repeatedly with everything on screen at once
+
+.PARAMETER Atlas
+  Edge length of the texture atlas. Defaults to 2048. Only the square is varied,
+  so the table is comparable across runs. Degradation is what this knob actually
+  moves: frame time barely notices, and placeholders never do.
 #>
 param(
   [ValidateSet('quick', 'bench', 'scale')]
-  [string]$Scenario = 'bench'
+  [string]$Scenario = 'bench',
+
+  [int]$Atlas = 2048
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,7 +51,7 @@ function Invoke-Scenario {
 
   # A renamed or dropped field used to read as $null and print as 0, which made a
   # broken run look like a fast one. Fail loudly instead.
-  foreach ($required in 'mean_ms', 'p99_ms', 'max_ms', 'over', 'frames', 'placeholders_pct', 'peak_visible') {
+  foreach ($required in 'mean_ms', 'p99_ms', 'max_ms', 'over', 'frames', 'placeholders_pct', 'degraded_pct', 'peak_visible') {
     if (-not $kv.ContainsKey($required)) { throw "RESULT is missing '$required': $($line.Line)" }
   }
 
@@ -57,6 +64,9 @@ function Invoke-Scenario {
     MaxMs       = [math]::Round([double]$kv['max_ms'], 2)
     OverBudget  = "$($kv['over'])/$($kv['frames'])"
     Placeholder = "$($kv['placeholders_pct'])%"
+    # Degradation is not a failure the way a placeholder is. It is the atlas being
+    # undersized for the visible set, so it gets a column rather than a verdict.
+    Degraded    = "$($kv['degraded_pct'])%"
     # The decision rule is zero frames over budget, not a mean under budget.
     # Testing the mean here reported 20k items as 'ok' while a third of its
     # frames were over the threshold.
@@ -66,8 +76,8 @@ function Invoke-Scenario {
 
 # Scenarios are objects, not nested arrays. PowerShell flattens nested arrays
 # when they are stored in a variable, which silently passes the wrong arguments.
-$realistic    = @('--pan=18', '--zoom=0.7', '--width=2560', '--height=1440', '--frames=200', '--atlas=2048')
-$allOnScreen  = @('--pan=0', '--zoom=0.96', '--width=2560', '--height=1440', '--frames=150', '--atlas=2048')
+$realistic    = @('--pan=18', '--zoom=0.7', '--width=2560', '--height=1440', '--frames=200', "--atlas=$Atlas")
+$allOnScreen  = @('--pan=0', '--zoom=0.96', '--width=2560', '--height=1440', '--frames=150', "--atlas=$Atlas")
 
 $scenarios = switch ($Scenario) {
   'quick' {
@@ -105,10 +115,16 @@ $results | Format-Table -AutoSize
 
 $over = @($results | Where-Object { $_.Budget -eq 'OVER' })
 $ph   = @($results | Where-Object { [double]($_.Placeholder -replace '%','') -gt 0.01 })
+$deg  = @($results | Where-Object { [double]($_.Degraded   -replace '%','') -gt 0.01 })
 
 Write-Host ''
 if ($over.Count) { Write-Host "$($over.Count) scenario(s) over budget:" -ForegroundColor Yellow; $over | ForEach-Object { Write-Host "  $($_.Scenario)  $($_.OverBudget) frames" -ForegroundColor Yellow } }
 else            { Write-Host 'No frames over budget in any scenario.' -ForegroundColor Green }
 if ($ph.Count)   { Write-Host "$($ph.Count) scenario(s) with placeholders: atlas too small for the visible set." -ForegroundColor Yellow }
 else            { Write-Host 'No placeholders: every visible item has a real texture.' -ForegroundColor Green }
+
+# Printed next to a 0% placeholder line on purpose. A real texture is not a sharp
+# one, and saying only the first thing is what made 0% placeholders read as a pass.
+if ($deg.Count)  { Write-Host "$($deg.Count) scenario(s) drawing a coarser mip than the screen size asked for:" -ForegroundColor Yellow; $deg | ForEach-Object { Write-Host "  $($_.Scenario)  $($_.Degraded) of visible item-frames" -ForegroundColor Yellow } }
+else            { Write-Host 'No mip degradation: every visible item drew at the level its screen size asked for.' -ForegroundColor Green }
 Write-Host ''

@@ -47,56 +47,99 @@ If more than one approach passes, the tiebreak is the one that needs no fork.
 
 ## Measured
 
-Canvas only, no UI library. Intel Iris Xe, Vulkan backend. Frame time is CPU
-submit plus a hard `device.poll(Wait)`, which serialises CPU and GPU and is
-pessimistic against a pipelined app.
+Canvas only, no UI library. Intel Iris Xe, Vulkan backend.
 
-`./scripts/bench.ps1` reproduces these. Expect roughly 2x run-to-run variance on
-a shared iGPU; read p99 and the over-budget count rather than the mean.
+`./scripts/bench.ps1` reproduces the numbers below. Expect roughly 2x run-to-run
+variance on a shared integrated GPU; read p99 and the over-budget count rather
+than the mean.
 
 Every scenario below is a **full board**: all items on screen at once. That is
 the case SQU-60 specifies, and until recently it was not what was being measured.
 
-| Scenario | Peak visible | Mean | p99 | Max | Over budget | Placeholders |
+### Frame times, and what they were actually measuring
+
+| Scenario | Peak visible | Mean | p99 | Max | Over budget | Degraded |
 |---|---|---|---|---|---|---|
-| 2,000 items / 2,000 distinct | 2,000 | 1.2-1.3ms | 2.3ms | 2.5-3.5ms | 0/200 | 0.00% |
-| 8,000 items / 8,000 distinct | 8,000 | 4.5-4.6ms | 9.5-10.2ms | 10.9-13.3ms | 0/200 | 0.00% |
-| 20,000 items / 20,000 distinct | 20,000 | 12.2-13.1ms | 26.3-27.4ms | 30.8-34.3ms | 49-69/200 | 0.00% |
-| 32,000 items / 32,000 distinct | 32,000 | 23.4ms | 44.7ms | 58.2ms | 169/200 | 0.00% |
+| 2,000 items / 2,000 distinct | 2,000 | 1.2-1.3ms | 2.3ms | 2.5-3.5ms | 0/200 | 74.21% |
+| 8,000 items / 8,000 distinct | 8,000 | 4.5-4.6ms | 9.5-10.2ms | 10.9-13.3ms | 0/200 | 93.61% |
+| 20,000 items / 20,000 distinct | 20,000 | 12.2-13.1ms | 26.3-27.4ms | 30.8-34.3ms | 49-69/200 | 97.44% |
+| 32,000 items / 32,000 distinct | 32,000 | 23.4ms | 44.7ms | 58.2ms | 169/200 | not measured |
+
+**The frame times in this table are stale, and the two columns are from
+different measurement epochs.** The timings predate the host-owned-clock change:
+`FrameStats` no longer carries a clock, so the harness times `draw_frame` **plus**
+a hard `device.poll(Wait)` rather than the CPU submit inside it. The 2,000-item
+case re-measured under the new definition came out at 3.97ms mean against 1.2ms
+here, which is what adding a GPU wait to a previously CPU-only number looks
+like. Only the timing columns are affected.
+
+The **Degraded** column was measured after that change and is a count of
+item-frames, not a timing, so it is stable: two runs produced bit-identical
+percentages. It is reproduced under *Mip degradation is the real constraint*
+below.
 
 The whole board is one draw call with no batching logic, so draw-call overhead is
 not a factor at any item count.
 
-**The wall is between 8,000 and 20,000 visible items.** The 2,000-item case that
-SQU-60 asks about passes with roughly 10x headroom, which is the headline result
-and it is now a real measurement rather than a proxy. 20,000 is over budget on
-between a quarter and a third of frames, and 32,000 is over on most of them.
+**The wall is between 8,000 and 20,000 visible items** on the old, CPU-submit
+definition, and the 2,000-item case that SQU-60 asks about passed with roughly
+10x headroom. Both positions have to be re-established under the new definition
+before anyone leans on where the wall is. A first contaminated attempt at
+re-measuring put 8,000 items over budget on 19/200 and then 103/200 frames in two
+consecutive runs on a machine sitting at 71% CPU with a browser and two GPU apps
+competing for the same integrated GPU, so the position is unresolved rather than
+moved.
 
-### Getting the board dense is what exposed the real constraint
+### Mip degradation is the real constraint
+
+Getting the board dense is what exposed this.
 
 `Config::extent` was 12,000, which scattered items across a 24,000-square world
 area while the viewport covers about 7,300 of it. Only 5% of items were ever on
-screen, and the 2,000-item scenario rendered 374 while reporting a healthy
-0.4ms. The number was real and the claim was worthless. It is now 1,000, which
-puts every item in view.
+screen, and the 2,000-item scenario rendered 374 while reporting a healthy 0.4ms.
+The number was real and the claim was worthless. It is now 1,000, which puts every
+item in view.
 
-That fix immediately produced a second finding, and it is the one that matters
-for the atlas. **A board full of 2,000 distinct images reports 0% placeholders
-and the metric is nearly meaningless.** The atlas is partitioned by mip level,
-so a 2,048 atlas holds only 256 slots at 128px. The rest fall back to 64px and
-then 32px, which is exactly the degradation the design intends, and the
-placeholder count stays at zero because nothing ever fails outright.
+That fix immediately produced a second finding. **A board full of 2,000 distinct
+images reports 0% placeholders, and on its own that says almost nothing.** The
+atlas is partitioned by mip level, so a 2,048 atlas holds only 256 slots at
+128px. The rest fall back to 64px and then 32px, which is exactly the degradation
+the design intends, and the placeholder count stays at zero because nothing ever
+fails outright.
 
-Measured: a 2,048 atlas and an 8,192 atlas produce identical frame times,
-identical over-budget counts and identical 0% placeholders. Tripling the atlas
-changes nothing the harness can see. So most of a 2,000-item board is being
-drawn substantially blurrier than its on-screen size warrants, and the current
-metrics are blind to it.
+The harness now counts **degraded** separately from placeholders: items drawn at a
+mip level coarser than their on-screen size asked for. That number is what makes
+the atlas legible, and the earlier claim that 2,048 and 8,192 atlases were
+indistinguishable is what the metric was missing.
 
-The harness has no metric for "got the mip level its screen size asked for",
-which is the one that would show this. Adding it is the obvious next thing, and
-until it exists **0% placeholders should be read as "nothing failed", not as
-"everything looks right"**.
+| Atlas | Peak visible | Placeholders | Degraded |
+|---|---|---|---|
+| 2,048 | 2,000 | 0.00% | **74.21%** |
+| 8,192 | 2,000 | 0.00% | **0.00%** |
+
+```
+.\scripts\bench.ps1 -Scenario quick              # atlas 2048
+.\scripts\bench.ps1 -Scenario quick -Atlas 8192  # atlas 8192
+```
+
+Same board, same seed, same budget. Placeholders are identical at 0.00% in both,
+which is the whole point: the column that used to be the only one available could
+not tell these two apart, and now it can. **Roughly three quarters of a
+2,000-image board was being drawn at a mip level well below what its on-screen
+size warranted, and the default atlas is the reason.**
+
+The arithmetic behind 74% is unforgiving and not fixable by a larger square
+alone. 2,000 items want roughly 2,000 x 128px, or 33M pixels, against 4.2M in a
+2,048 atlas. It cannot fit. 8,192 has the 67M to hold them, which is why it
+reaches 0.00% and not merely a lower number.
+
+The implication for the design is that **atlas capacity, not frame time, is what
+bounds a dense board.** The frame-time wall is somewhere between 2,000 and 32,000
+visible items and needs re-measuring; the quality wall is 2,000 items at a 2,048
+atlas, and it is crossed today. A moodboard of a few hundred references is fine.
+A few thousand references need a bigger atlas or a coarser rendering policy, and
+which one is the same question as how large thumbnails are on disk. That is
+SQU-65, and it now has the number it needs.
 
 ### The CPU/GPU split is no longer measured
 
@@ -191,8 +234,8 @@ pool: overflow at one level falls back to the next rather than borrowing space.
 That makes the arithmetic unforgiving at full density. A board of 2,000 items
 wants roughly 2,000 x 128px, or 33M pixels, against an atlas of 4.2M. It cannot
 fit, and the fallback is the designed behaviour, so the board renders rather
-than failing. See **Getting the board dense is what exposed the real
-constraint** for what that costs and why no current metric sees it.
+than failing. Measured, that fallback is **74.21% of item-frames** at 2,048 and
+**0.00%** at 8,192. See *Mip degradation is the real constraint* for the runs.
 
 Pushing past this means a larger atlas, coarser rendering when many items are
 visible, or abandoning the atlas for per-item textures. SQU-65 should own that
@@ -209,9 +252,11 @@ intended stack.
 
 ## Still to do
 
-- Add a metric for "got the mip level its screen size asked for". The atlas is
-  partitioned by level, so overflow degrades quietly and the placeholder count
-  cannot see it.
+- **Re-measure the frame-time table on a quiet machine.** The host now owns the
+  clock and the harness measures `draw_frame` plus a hard GPU wait, so the
+  published timings are from the older CPU-submit definition and the wall's
+  position between 2,000 and 32,000 items is unresolved. This is the first item
+  because every other performance claim depends on it.
 - Restore a GPU-vs-CPU split if any decision depends on which side is the
   bottleneck.
 - `host-iced`: written, shares one wgpu device with the canvas, and has never
@@ -226,5 +271,7 @@ intended stack.
 - Canvas text via `cosmic-text` + `glyphon`. Anything drawn in the renderer is
   shared between desktop and web, and the chrome is not, so this is the
   highest-leverage piece of the renderer rather than a later polish item.
-- Decide atlas capacity policy, or move off the atlas. The web has a smaller
-  texture budget than the desktop, so there are two answers, not one.
+- Decide atlas capacity policy, or move off the atlas. The measured number now
+  exists: 74.21% of item-frames degrade at 2,048 and 0.00% at 8,192 for a
+  2,000-item board. The web has a smaller texture budget than the desktop, so
+  there are two answers, not one.
