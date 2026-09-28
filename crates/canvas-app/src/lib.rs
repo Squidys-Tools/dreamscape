@@ -183,6 +183,13 @@ pub struct FrameStats {
     pub drawn: u32,
     /// Items drawn as a placeholder because no level could be placed.
     pub placeholder: u32,
+    /// Items drawn at a mip level coarser than their screen size asked for.
+    ///
+    /// Not a failure, unlike `placeholder`. The atlas is partitioned by level,
+    /// so a dense board of distinct images saturates the fine levels and falls
+    /// back. Reported on its own because a placeholder count of zero means
+    /// "nothing failed", not "everything is sharp".
+    pub degraded: u32,
     /// Texture level uploads this frame.
     pub uploads: u32,
     pub evictions: u64,
@@ -247,6 +254,10 @@ impl Metrics {
 
     pub fn total_visible(&self) -> u32 {
         self.samples.iter().map(|s| s.stats.visible).sum()
+    }
+
+    pub fn total_degraded(&self) -> u32 {
+        self.samples.iter().map(|s| s.stats.degraded).sum()
     }
 }
 
@@ -385,6 +396,7 @@ impl AppState {
             visible: visible.len() as u32,
             drawn,
             placeholder: canvas.last_frame_dropped,
+            degraded: canvas.last_frame_degraded,
             uploads: st.uploads_this_frame,
             evictions: st.evictions_total,
         }

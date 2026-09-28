@@ -18,7 +18,7 @@ Watch for: quoting a figure from an earlier run, averaging across two different 
 
 The scene is generated, which means it can be generated wrong, and the benchmark will happily report a beautiful number for an empty board. `Config::extent` was 12,000, which scattered items across a 24,000-square world area while a 2560x1440 viewport covers about 7,300 of it. Only 5% of items were ever on screen, so the 2,000-item scenario rendered 374 items in 0.4ms. The number was real and the claim was worthless.
 
-The same trap has a quieter form. A full board of 2,000 distinct images reports 0% placeholders, because the atlas is partitioned by mip level and overflow degrades to a coarser level instead of failing. An 8,192 atlas and a 2,048 atlas measure identically. So "0% placeholders" means "nothing failed", not "everything looks right", and the harness has no metric that tells the difference yet.
+The same trap has a quieter form. A full board of 2,000 distinct images reports 0% placeholders, because the atlas is partitioned by mip level and overflow degrades to a coarser level instead of failing. An 8,192 atlas and a 2,048 atlas reported identically until the harness learned to count **degraded** items separately from placeholders. So "0% placeholders" means "nothing failed", not "everything looks right", and it is only meaningful next to the degraded count.
 
 Also: a still frame is not a pan, CPU submit is not frame time, and headless is not windowed.
 
@@ -62,6 +62,7 @@ We need to be on the same page with terminology. When communicating, use this la
 - **mip level** means one resolution of a thumbnail's pyramid. Level 0 is full size.
 - **resident** means a mip level currently occupying an atlas slot.
 - **placeholder** means a flat swatch drawn because no level could be placed. A bug signal, not styling.
+- **degraded** means drawn at a mip level coarser than the one the item's on-screen size asked for. Designed behaviour, not a bug: a placeholder is a broken board, a degraded board is an undersized atlas.
 - **cull** means deciding which items intersect the viewport. Runs every frame.
 - **LOD** means picking which mip level an item draws at, from its size on screen.
 - **peak visible** means the most items on screen in any measured frame. This is the number that says whether a scene is dense enough for its frame times to mean anything.
@@ -155,7 +156,7 @@ Full reasoning, and the findings that shaped it, in `docs/spikes/canvas-spike.md
 Recorded so nobody re-derives the failure. Tracked in Linear.
 
 - **`cargo run -p host-iced` opens a window and never draws.** SQU-73. This is a machine-level presentation failure, not a bug in the host. A raw winit plus wgpu probe presents 180+ frames with `present()` returning `Ok` and no wgpu errors, and the client area still shows nothing. Confirmed while foregrounded, and in a full-desktop capture where other GPU-composited windows render normally.
-- **Nothing measures mip degradation.** A dense board of distinct images hits the atlas ceiling by falling back to coarser levels, and every metric stays clean. A 2,048 atlas and an 8,192 atlas are indistinguishable to the harness. Read 0% placeholders as "nothing failed".
+- **The published frame-time table no longer matches what the harness prints.** `docs/spikes/canvas-spike.md` measured CPU submit alone. `FrameStats` no longer carries a clock, the host owns timing, and the harness now measures `draw_frame` **plus** a hard `device.poll(Wait)`. The caption claimed the newer definition while the numbers were taken under the older one. Until the table is re-measured on a quiet machine, treat its positions as indicative and its caption as corrected, not its numbers.
 
 ## Taste
 

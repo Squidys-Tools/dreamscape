@@ -86,6 +86,7 @@ pub fn run(cfg: &RunConfig) -> RunReport {
 pub fn report(m: &Metrics, adapter: &wgpu::AdapterInfo, budget_ms: f64) -> String {
     let (mean, p50, p99, max, over) = m.percentiles(budget_ms);
     let ph = m.total_placeholder();
+    let deg = m.total_degraded();
     let vis = m.total_visible();
     let mut out = String::new();
     out.push_str(&format!(
@@ -102,6 +103,10 @@ pub fn report(m: &Metrics, adapter: &wgpu::AdapterInfo, budget_ms: f64) -> Strin
         "placeholder       {ph} of {vis} item-frames ({:.2}%)\n",
         100.0 * ph as f64 / vis.max(1) as f64
     ));
+    out.push_str(&format!(
+        "degraded          {deg} of {vis} item-frames ({:.2}%)\n",
+        100.0 * deg as f64 / vis.max(1) as f64
+    ));
     out
 }
 
@@ -109,12 +114,14 @@ pub fn report(m: &Metrics, adapter: &wgpu::AdapterInfo, budget_ms: f64) -> Strin
 pub fn machine_line(m: &Metrics, budget_ms: f64) -> String {
     let (mean, p50, p99, max, over) = m.percentiles(budget_ms);
     let ph = m.total_placeholder();
+    let deg = m.total_degraded();
     let vis = m.total_visible();
     format!(
         "RESULT frames={} mean_ms={mean:.3} p50_ms={p50:.3} p99_ms={p99:.3} \
-         max_ms={max:.3} over={over} placeholders_pct={:.2} peak_visible={}",
+         max_ms={max:.3} over={over} placeholders_pct={:.2} degraded_pct={:.2} peak_visible={}",
         m.len(),
         100.0 * ph as f64 / vis.max(1) as f64,
+        100.0 * deg as f64 / vis.max(1) as f64,
         m.peak_visible
     )
 }

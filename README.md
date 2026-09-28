@@ -26,8 +26,10 @@ The renderer works and is measured headlessly. The windowed path does not work o
 **Not working:**
 
 * **Nothing draws to a window.** A raw winit plus wgpu probe, no UI framework involved, presents 180+ frames with `present()` returning `Ok` and no wgpu errors, and the client area stays white. Confirmed while foregrounded and in a full-desktop capture where other GPU-composited windows render normally. Headless wgpu is fine, so the renderer is fine; the display path on this machine is not. This is the biggest open problem and it is an environment issue, not a code issue.
-* **Nothing measures mip degradation.** A full board of distinct images hits the atlas ceiling by quietly falling back to coarser mip levels. A 2,048 atlas and an 8,192 atlas measure identically, so "0% placeholders" means nothing failed rather than everything looks right.
+* **The frame-time table is stale.** The host now owns the clock, so the harness measures `draw_frame` plus a hard GPU wait rather than CPU submit alone. The published numbers were taken under the old definition and need re-measuring on a quiet machine before anyone relies on where the performance wall sits.
 * **No UI toolkit chosen yet.** iced is written and shares one wgpu device. Zed's toolkit is the other candidate and is a dependency question, not a performance one.
+
+**The quality wall, measured.** A full board of 2,000 distinct images does not come out sharp on the default atlas. The harness counts items drawn at a coarser mip level than their on-screen size asked for, and reports that next to placeholders: **74.21% of item-frames degrade on a 2,048 atlas and 0.00% on an 8,192**, with placeholders at 0.00% in both. Placeholders never caught this, because falling back to a blurrier level is the designed behaviour rather than a failure. Choosing the atlas size is now the thing that bounds a dense board.
 
 Expect rough edges and missing pieces. This is a spike, and spikes that finish are the exception.
 
