@@ -1,0 +1,37 @@
+{
+  "id": "trail-confidence",
+  "display_name": "Confidence Eval",
+  "enabled": true,
+  "scope": "trail",
+  "runtime": {
+    "kind": "prompt_runner",
+    "agent": "claude",
+    "timeout_ms": 300000,
+    "sandbox": {
+      "base_template": "claude",
+      "repo_token": "read"
+    }
+  },
+  "automation": {
+    "kind": "trail_prompt"
+  },
+  "prompt": {
+    "template": "You are a confidence evaluator. Analyze the changes on branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nRun `git diff origin/{{base_branch}}...HEAD` and inspect the changed code, benchmark harness, scripts, and docs. Score **confidence** from 0 to 100 (higher = more confident the changes are correct and the resulting measurements or claims are trustworthy). Consider whether benchmark inputs represent the visible workload, reported metrics retain their names, units, and meanings across producers and consumers, and native and wasm builds continue to use the shared Rust canvas. Treat a single benchmark run as weak evidence; look for reproducible measurements with mean, p99, and over-budget count where relevant.\n\nScore bands: 90–100: correctness-critical paths and affected consumers are consistent, and claims are reproducible; 70–89: changes look sound with limited verification gaps; 40–69: meaningful uncertainty in benchmark validity, metric propagation, or cross-target behavior; 0–39: likely incorrect results, broken consumers, or unsupported claims.\n\nOutput ONLY this JSON object as the very last line of your response:\n\n{\"value\": <number 0-100>, \"rationale\": \"<1-2 sentence explanation>\"}"
+  },
+  "select": {
+    "trigger_types": [
+      "api",
+      "push"
+    ]
+  },
+  "output": {
+    "adapter": "last_json_line",
+    "result_type": "trail_monitor",
+    "trail_monitor": {
+      "key": "confidence",
+      "label": "Confidence",
+      "value_type": "percent",
+      "polarity": "higher_is_better"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "id": "trail-risk",
+  "display_name": "Risk Eval",
+  "enabled": true,
+  "scope": "trail",
+  "runtime": {
+    "kind": "prompt_runner",
+    "agent": "claude",
+    "timeout_ms": 300000,
+    "sandbox": {
+      "base_template": "claude",
+      "repo_token": "read"
+    }
+  },
+  "automation": {
+    "kind": "trail_prompt"
+  },
+  "prompt": {
+    "template": "You are a risk evaluator. Analyze the changes on branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nRun `git diff origin/{{base_branch}}...HEAD` to see the changes. Score **risk** from 0 to 100 (higher = more potential damage if something is wrong). In this repository, the primary risk is invalidating the evidence used to make canvas architecture decisions. Consider whether generated scenes actually place representative item counts on screen; whether benchmark results distinguish headless from windowed, still frames from pans, and CPU submit time from frame time; and whether claims account for run-to-run variance rather than presenting a single sample as a result. Check that metric names, units, and meanings stay aligned from frame statistics through the RESULT line, PowerShell parser, reports, and docs, with missing fields failing loudly. Also consider changes to shared Rust rendering behavior across native and wasm, especially culling, LOD, atlas allocation/eviction, and placeholder interpretation.\n\nScore bands: 0–19: no meaningful threat to measurement validity or renderer correctness; 20–39: localized, readily detectable issue; 40–69: likely to skew results or break a benchmark consumer or rendering path; 70–100: results could materially mislead architecture decisions, critical metrics may silently become zero or change meaning, or core rendering behavior is broadly broken.\n\nOutput ONLY this JSON object as the very last line of your response:\n\n{\"value\": <number 0-100>, \"rationale\": \"<1-2 sentence explanation>\"}"
+  },
+  "select": {
+    "trigger_types": [
+      "api",
+      "push"
+    ]
+  },
+  "output": {
+    "adapter": "last_json_line",
+    "result_type": "trail_monitor",
+    "trail_monitor": {
+      "key": "risk",
+      "label": "Risk",
+      "value_type": "percent",
+      "polarity": "lower_is_better"
+    }
+  }
+}
