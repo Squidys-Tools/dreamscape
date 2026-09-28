@@ -3,6 +3,8 @@
 //! Runs the shared `AppState` with no UI attached, so the canvas baseline is
 //! known independently of whichever host it is later embedded in.
 
+use std::time::Instant;
+
 use canvas_app::{AppState, Config, Metrics};
 use canvas_gpu::GpuCanvas;
 
@@ -35,8 +37,14 @@ pub struct RunReport {
 
 /// Drive the renderer and measure.
 ///
-/// Frame time recorded here is CPU work only, plus an optional hard GPU wait.
-/// The host builds report their own numbers; this is the floor to compare against.
+/// The measured frame is the `draw_frame` call **plus** a hard
+/// `device.poll(Wait)`. That serialises CPU and GPU, so the number is a ceiling
+/// rather than a typical frame, which is the honest direction to be wrong in.
+///
+/// It used to time only the inside of `draw_frame`, which is CPU submit. The
+/// documented meaning of the metric is "CPU submit plus a hard GPU wait", and
+/// CPU submit on its own is not frame time, so the two have to be made to
+/// agree before any cross-target number means anything.
 pub fn run(cfg: &RunConfig) -> RunReport {
     let (device, queue, format, adapter) = canvas_gpu::headless_device();
 
@@ -62,10 +70,12 @@ pub fn run(cfg: &RunConfig) -> RunReport {
     let mut metrics = Metrics::default();
 
     for frame in 0..(cfg.warmup + cfg.frames) {
+        let t0 = Instant::now();
         let stats = app.draw_frame(&mut canvas, &device, &queue, &target_view, size);
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let cpu = t0.elapsed();
         if frame >= cfg.warmup {
-            metrics.push(stats);
+            metrics.push(cpu, stats);
         }
     }
 

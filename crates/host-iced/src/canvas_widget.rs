@@ -297,7 +297,9 @@ impl Primitive for CanvasPrimitive {
 
         sh.last_uploads = stats.uploads;
         sh.last_evictions = stats.evictions;
-        sh.metrics.push(stats);
+        // The host owns the clock. `start` was taken at the top of `update`,
+        // so this is the whole host frame, canvas work included.
+        sh.metrics.push(start.elapsed(), stats);
         if sh.metrics.len() > 3_000 {
             sh.metrics.clear();
         }
