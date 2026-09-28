@@ -6,7 +6,7 @@
 //! comparable.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use canvas_core::{Item, SpatialGrid, Vec2, Viewport};
 use canvas_gpu::GpuCanvas;
@@ -168,10 +168,15 @@ impl Default for Config {
     }
 }
 
+/// Counters the renderer produces for one frame.
+///
+/// Deliberately carries no timing. The renderer cannot time itself: on
+/// `wasm32-unknown-unknown` `std::time::Instant::now()` traps with `unreachable`
+/// outside an atomics build, so a clock in here would make the whole canvas
+/// unusable in a browser. The host owns the clock and the frame boundary, which
+/// is also the only place that knows what a frame is on its platform.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
-    /// CPU work: cull, residency, encode, submit.
-    pub cpu: Duration,
     /// Visible items surviving culling.
     pub visible: u32,
     /// Items actually drawn.
@@ -183,16 +188,32 @@ pub struct FrameStats {
     pub evictions: u64,
 }
 
+/// One frame as measured, which is a host measurement wrapped around a
+/// renderer result.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameSample {
+    /// Wall time for the frame, GPU wait included, as defined by the host.
+    ///
+    /// The headless harness includes a hard `device.poll(Wait)`, which
+    /// serialises CPU and GPU and makes this a ceiling. The browser awaits
+    /// submitted GPU work instead. Both are deliberately pessimistic: CPU
+    /// submit on its own is not frame time.
+    pub cpu: Duration,
+    pub stats: FrameStats,
+}
+
 #[derive(Default)]
 pub struct Metrics {
-    pub samples: Vec<FrameStats>,
+    pub samples: Vec<FrameSample>,
     pub peak_visible: u32,
 }
 
 impl Metrics {
-    pub fn push(&mut self, s: FrameStats) {
-        self.peak_visible = self.peak_visible.max(s.visible);
-        self.samples.push(s);
+    /// Record one frame. `cpu` is required, so a host cannot silently report a
+    /// zero it never measured.
+    pub fn push(&mut self, cpu: Duration, stats: FrameStats) {
+        self.peak_visible = self.peak_visible.max(stats.visible);
+        self.samples.push(FrameSample { cpu, stats });
     }
     pub fn clear(&mut self) {
         self.samples.clear();
@@ -221,11 +242,11 @@ impl Metrics {
     }
 
     pub fn total_placeholder(&self) -> u32 {
-        self.samples.iter().map(|s| s.placeholder).sum()
+        self.samples.iter().map(|s| s.stats.placeholder).sum()
     }
 
     pub fn total_visible(&self) -> u32 {
-        self.samples.iter().map(|s| s.visible).sum()
+        self.samples.iter().map(|s| s.stats.visible).sum()
     }
 }
 
@@ -311,7 +332,11 @@ impl AppState {
     /// Cull, ensure residency, and draw into `target`.
     ///
     /// This is the whole per-frame pipeline and it is identical for every host,
-    /// so differences in frame time come from the host, not from here.
+    /// so differences in frame time come from the host, not from here. It takes
+    /// a plain texture view rather than a surface, which is what lets the
+    /// browser and a native toolkit drive the same call.
+    ///
+    /// It does not time itself. See [`FrameStats`].
     pub fn draw_frame(
         &mut self,
         canvas: &mut GpuCanvas,
@@ -320,7 +345,6 @@ impl AppState {
         target: &wgpu::TextureView,
         size: Vec2,
     ) -> FrameStats {
-        let t0 = Instant::now();
         self.advance();
         self.frame += 1;
         let t = (self.frame % 600) as f32 / 600.0;
@@ -358,7 +382,6 @@ impl AppState {
 
         let st = canvas.atlas().stats();
         FrameStats {
-            cpu: t0.elapsed(),
             visible: visible.len() as u32,
             drawn,
             placeholder: canvas.last_frame_dropped,
