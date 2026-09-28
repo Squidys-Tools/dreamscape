@@ -21,12 +21,20 @@
   Edge length of the texture atlas. Defaults to 2048. Only the square is varied,
   so the table is comparable across runs. Degradation is what this knob actually
   moves: frame time barely notices, and placeholders never do.
+
+.PARAMETER ResultLog
+  Append each scenario's raw RESULT line to this file. A figure quoted in the docs
+  has to be read off captured output rather than off a terminal, and the console
+  table is a Format-Table object, so it does not survive redirection as text. The
+  RESULT line is the stable interface.
 #>
 param(
   [ValidateSet('quick', 'bench', 'scale')]
   [string]$Scenario = 'bench',
 
-  [int]$Atlas = 2048
+  [int]$Atlas = 2048,
+
+  [string]$ResultLog
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,6 +50,8 @@ function Invoke-Scenario {
 
   $line = $out | Select-String '^RESULT ' | Select-Object -Last 1
   if (-not $line) { $out | Write-Host; throw "no RESULT line from: $Label" }
+
+  if ($ResultLog) { Add-Content -Path $ResultLog -Value "$Label | atlas=$Atlas | $($line.Line)" }
 
   $kv = @{}
   foreach ($m in [regex]::Matches($line.Line, '(\w+)=([\w.]+)')) {
@@ -110,8 +120,19 @@ Write-Host ''
 Write-Host "canvas spike  |  budget ${BUDGET}ms  |  CPU submit + hard GPU wait" -ForegroundColor Cyan
 Write-Host ''
 
+# A captured figure has to carry the machine it came from. Roughly 2x variance is
+# expected on a shared iGPU and far worse when something else is using the GPU, so
+# the load is bracketed into the result log rather than left to memory.
+if ($ResultLog) {
+  "load before: $((Get-CimInstance Win32_Processor).LoadPercentage)% cpu" | Add-Content -Path $ResultLog
+}
+
 $results = foreach ($s in $scenarios) { Invoke-Scenario -Label $s.Label -Extra $s.Args }
 $results | Format-Table -AutoSize
+
+if ($ResultLog) {
+  "load after: $((Get-CimInstance Win32_Processor).LoadPercentage)% cpu" | Add-Content -Path $ResultLog
+}
 
 $over = @($results | Where-Object { $_.Budget -eq 'OVER' })
 $ph   = @($results | Where-Object { [double]($_.Placeholder -replace '%','') -gt 0.01 })

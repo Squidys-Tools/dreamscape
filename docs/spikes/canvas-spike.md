@@ -68,10 +68,11 @@ the case SQU-60 specifies, and until recently it was not what was being measured
 **The frame times in this table are stale, and the two columns are from
 different measurement epochs.** The timings predate the host-owned-clock change:
 `FrameStats` no longer carries a clock, so the harness times `draw_frame` **plus**
-a hard `device.poll(Wait)` rather than the CPU submit inside it. The 2,000-item
-case re-measured under the new definition came out at 3.97ms mean against 1.2ms
-here, which is what adding a GPU wait to a previously CPU-only number looks
-like. Only the timing columns are affected.
+a hard `device.poll(Wait)` rather than the CPU submit inside it. Only the timing
+columns are affected. A GPU wait inside the measured window can only make the
+figure larger, so these numbers are not pessimistic against the new definition,
+they measure something else. The direction is not the problem; the fact that they
+were taken under a different definition is.
 
 The **Degraded** column was measured after that change and is a count of
 item-frames, not a timing, so it is stable: two runs produced bit-identical
@@ -83,12 +84,42 @@ not a factor at any item count.
 
 **The wall is between 8,000 and 20,000 visible items** on the old, CPU-submit
 definition, and the 2,000-item case that SQU-60 asks about passed with roughly
-10x headroom. Both positions have to be re-established under the new definition
-before anyone leans on where the wall is. A first contaminated attempt at
-re-measuring put 8,000 items over budget on 19/200 and then 103/200 frames in two
-consecutive runs on a machine sitting at 71% CPU with a browser and two GPU apps
-competing for the same integrated GPU, so the position is unresolved rather than
-moved.
+10x headroom. Neither position survives the definition change, so where the wall
+is now is **unresolved rather than moved**, and no number should be quoted until
+it is re-established.
+
+Re-measuring was attempted and could not produce a defensible figure. Four runs
+of the identical 2,000-item scenario, same commit, same command, at 47-71% CPU
+load on a machine where a browser and two GPU apps share the integrated GPU:
+
+| Run | Mean | p99 | Over budget |
+|---|---|---|---|
+| 1 | 3.97ms | 7.20ms | 0/200 |
+| 2 | 4.62ms | 10.16ms | 1/200 |
+| 3 | 6.92ms | 24.24ms | 6/200 |
+| 4 | 3.97ms | 7.22ms | 0/200 |
+
+The p99 moves by 3x and the over-budget count by 6 frames across runs that differ
+only in what else the machine was doing. The documented 2x run-to-run variance is
+an underestimate under load. On the 8,000-item scenario two consecutive runs gave
+19/200 and 103/200 against a published 0/200.
+
+That is the honest state: the renderer is unchanged, the machine is not idle, and
+a mean quoted from any one of those runs would be a number nobody could
+reproduce. Degradation is unaffected, because it is a count of item-frames rather
+than a timing, and it returned 74.21% in all four.
+
+To close this, on an idle machine, capture rather than read off the screen:
+
+```
+.\scripts\bench.ps1 -Scenario bench -ResultLog bench.txt
+.\scripts\bench.ps1 -Scenario scale -ResultLog bench.txt
+```
+
+The log brackets the run with the CPU load, so a figure that survives into the
+docs carries the conditions it was taken under. The console table is a
+`Format-Table` object and does not survive redirection as text, which is why the
+`RESULT` line is the thing to capture.
 
 ### Mip degradation is the real constraint
 
@@ -144,11 +175,16 @@ SQU-65, and it now has the number it needs.
 ### The CPU/GPU split is no longer measured
 
 This document previously claimed the workload was "CPU-bound at 85-90%"
-throughout. The refactor into `canvas-app` kept a single `FrameStats::cpu`
-timing and dropped the separate GPU timing, so that claim can no longer be
-substantiated and has been removed. `bench.ps1` no longer prints a `CpuMs`
-column for the same reason. Restoring the split needs a timestamp-query or
-buffer-readback path, and nothing currently depends on it.
+throughout. The refactor into `canvas-app` kept a single CPU timing and dropped
+the separate GPU timing, so that claim can no longer be substantiated and has
+been removed. `bench.ps1` no longer prints a `CpuMs` column for the same reason.
+
+`FrameStats` now carries no clock at all: the renderer cannot call
+`Instant::now()` on `wasm32-unknown-unknown`, and the host is the only layer that
+knows what a frame is on its platform. The harness's number is the whole frame
+including a hard GPU wait, which is the sum, not a split. Restoring the split
+needs a timestamp-query or buffer-readback path, and nothing currently depends on
+it.
 
 ## Windowed presentation does not work on the dev machine
 
@@ -252,11 +288,14 @@ intended stack.
 
 ## Still to do
 
-- **Re-measure the frame-time table on a quiet machine.** The host now owns the
+- **Re-measure the frame-time table on an idle machine.** The host now owns the
   clock and the harness measures `draw_frame` plus a hard GPU wait, so the
   published timings are from the older CPU-submit definition and the wall's
-  position between 2,000 and 32,000 items is unresolved. This is the first item
-  because every other performance claim depends on it.
+  position is unresolved. Four attempts on a loaded machine ranged 3.97-6.92ms
+  mean and 7.20-24.24ms p99 on the same scenario, so this cannot be closed from
+  a busy desktop. Command and method are in *Frame times, and what they were
+  actually measuring*. First item because every other performance claim depends
+  on it.
 - Restore a GPU-vs-CPU split if any decision depends on which side is the
   bottleneck.
 - `host-iced`: written, shares one wgpu device with the canvas, and has never
