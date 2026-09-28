@@ -442,7 +442,11 @@ impl Atlas {
     /// blurrier one rather than a grey box. A coarser level stretched to the
     /// same on-screen size is blurry, never distorted, which is what mipmapping
     /// already does.
-    pub fn uv_rect(&self, key: u32, level: u32) -> Option<[f32; 4]> {
+    ///
+    /// Returns the level actually used alongside the rect, so a caller that
+    /// needs to know whether the item was degraded gets it without a second
+    /// residency lookup on the hot path.
+    pub fn uv_rect(&self, key: u32, level: u32) -> Option<(u32, [f32; 4])> {
         let r = self.resident.get(&key)?;
         if level >= MIP_LEVELS {
             return None;
@@ -453,12 +457,15 @@ impl Atlas {
         let (ox, oy) = self.slot_origin(used as u32, slot);
         let inv = 1.0 / self.config.size as f32;
         let half = 0.5 * inv;
-        Some([
-            ox as f32 * inv + half,
-            oy as f32 * inv + half,
-            (ox + px) as f32 * inv - half,
-            (oy + px) as f32 * inv - half,
-        ])
+        Some((
+            used as u32,
+            [
+                ox as f32 * inv + half,
+                oy as f32 * inv + half,
+                (ox + px) as f32 * inv - half,
+                (oy + px) as f32 * inv - half,
+            ],
+        ))
     }
 
     /// Evict a texture to free one slot at `level`.
@@ -581,6 +588,14 @@ pub struct GpuCanvas {
     /// Visible items skipped last frame because their texture had no atlas slot.
     /// Non-zero means eviction dropped something on screen, i.e. a hole in the board.
     pub last_frame_dropped: u32,
+    /// Visible items drawn at a mip level coarser than their screen size asked for.
+    ///
+    /// Unlike a dropped item this is designed behaviour, not a bug: the atlas is
+    /// partitioned by level, so a board of distinct images saturates the fine
+    /// levels and falls back to blurrier ones. It is reported separately because
+    /// a placeholder count of zero says only that nothing failed, and this is the
+    /// number that says whether the board is actually sharp.
+    pub last_frame_degraded: u32,
 }
 
 impl GpuCanvas {
@@ -702,6 +717,7 @@ impl GpuCanvas {
             instance_capacity: capacity.get() as u64,
             background: [0.09, 0.09, 0.10, 1.0],
             last_frame_dropped: 0,
+            last_frame_degraded: 0,
         }
     }
 
@@ -744,10 +760,20 @@ impl GpuCanvas {
     ) -> u32 {
         let mut batch: Vec<Instance> = Vec::with_capacity(visible.len());
         let mut dropped = 0u32;
+        let mut degraded = 0u32;
         let placeholder = self.atlas.placeholder_uv();
         for v in visible {
             let uv = match self.atlas.uv_rect(v.tex, v.mip) {
-                Some(uv) => uv,
+                Some((used, uv)) => {
+                    // A coarser level than LOD asked for. Counted here, beside the
+                    // loop that chose it, because the fallback is silent: the item
+                    // draws correctly and no other metric in the pipeline can see
+                    // that it is blurrier than the screen size warranted.
+                    if used > v.mip {
+                        degraded += 1;
+                    }
+                    uv
+                }
                 None => {
                     // No slot for this texture. Draw the placeholder rather than
                     // nothing, and record it so the harness can flag a board
@@ -772,6 +798,7 @@ impl GpuCanvas {
         }
         if batch.is_empty() {
             self.last_frame_dropped = dropped;
+            self.last_frame_degraded = degraded;
             return 0;
         }
 
@@ -809,6 +836,7 @@ impl GpuCanvas {
         }
         let _ = device;
         self.last_frame_dropped = dropped;
+        self.last_frame_degraded = degraded;
         batch.len() as u32
     }
 }
