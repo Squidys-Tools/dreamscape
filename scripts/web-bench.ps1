@@ -61,17 +61,25 @@ $crate = Join-Path $PSScriptRoot '..\crates\canvas-wasm'
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
 if ($ResultLog) {
+  # Only check when the path actually has a directory part. A bare filename is
+  # the most natural invocation and `Split-Path -Parent` returns nothing for it,
+  # which then looks like a missing directory.
   $dir = Split-Path -Parent $ResultLog
-  if (-not (Test-Path -LiteralPath $dir)) { throw "ResultLog directory does not exist: $dir" }
+  if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+    throw "ResultLog directory does not exist: $dir"
+  }
 }
 
 # The WebGL2 fallback needs its backend compiled in, which drags GLES and wgpu-hal
 # into the bundle. Off by default, so this is the only thing that turns it on.
-$features = if ($Backend -eq 'webgl') { '--features webgl' } else { '' }
+# Built as an array because an empty string variable still becomes an argument,
+# and cargo rejects a blank one.
+$wasmArgs = @('build', $crate, '--target', 'web', '--release', '--out-dir', 'pkg', '--out-name', 'canvas_wasm')
+if ($Backend -eq 'webgl') { $wasmArgs += @('--features', 'webgl') }
 
 Write-Host ''
 Write-Host 'building the renderer for wasm32-unknown-unknown...' -ForegroundColor Cyan
-& wasm-pack build $crate --target web --release --out-dir pkg --out-name canvas_wasm $features
+& wasm-pack @wasmArgs
 if ($LASTEXITCODE -ne 0) { throw "wasm-pack build failed" }
 
 # Reported because it is a result, not a detail: the download size is different
@@ -83,8 +91,11 @@ Write-Host ''
 # Port 0 lets the OS pick, so a second run never collides with the first and no
 # port is ever committed.
 $serverLog = Join-Path $env:TEMP "dreamscape-web-bench-$PID.log"
+# Same reason as the wasm arguments: a blank argument is worse than no argument.
+$serveArgs = @((Join-Path $crate 'web\serve.js'), '0')
+if ($ResultLog) { $serveArgs += (Join-Path (Get-Location) $ResultLog) }
 $server = Start-Process -PassThru -NoNewWindow -FilePath 'bun' `
-  -ArgumentList @((Join-Path $crate 'web\serve.js'), '0', $(if ($ResultLog) { (Join-Path (Get-Location) $ResultLog) } else { '' })) `
+  -ArgumentList $serveArgs `
   -RedirectStandardOutput $serverLog -RedirectStandardError "$serverLog.err"
 
 try {

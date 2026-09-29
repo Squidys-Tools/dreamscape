@@ -28,6 +28,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
+use std::cell::RefCell;
 use std::time::Duration;
 
 use canvas_app::{AppState, Config, FrameStats, Metrics, Motion, BUDGET_MS};
@@ -82,22 +83,39 @@ fn describe(info: &wgpu::AdapterInfo) -> String {
 /// The `Vec2` positions the host forwards are in device pixels relative to the
 /// canvas, so a page with a CSS-scaled canvas multiplies by `devicePixelRatio`
 /// exactly once, here in JavaScript.
-#[wasm_bindgen]
-pub struct CanvasHost {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
+/// Everything a frame can change.
+///
+/// Split out and behind a [`RefCell`] because of one rule from `wasm-bindgen`:
+/// an exported `&mut self` method that awaits holds its borrow until the future
+/// resolves. Any other call into the same object during that window is a
+/// re-entrant mutable borrow, and `wasm-bindgen` panics with "recursive use of
+/// an object detected which would lead to unsafe aliasing in rust".
+///
+/// That is not a theoretical hazard. The frame loop awaits the GPU on every
+/// frame, so a pointer event arriving mid-frame lands inside the borrow window
+/// and throws. With `&self` exports and the mutable state in here, a borrow is
+/// taken for a few statements and dropped before anything awaits, and the
+/// browser can call in whenever it likes.
+struct Inner {
     config: wgpu::SurfaceConfiguration,
     canvas: GpuCanvas,
     app: AppState,
     metrics: Metrics,
     size: Vec2,
-    perf: Performance,
-    adapter: String,
     /// Downsampled RGB of the last readback, for [`CanvasHost::verify_map`].
     map: Vec<u8>,
     map_w: u32,
     map_h: u32,
+}
+
+#[wasm_bindgen]
+pub struct CanvasHost {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    perf: Performance,
+    adapter: String,
+    inner: RefCell<Inner>,
 }
 
 #[wasm_bindgen]
@@ -235,63 +253,70 @@ impl CanvasHost {
             device,
             queue,
             surface,
-            config,
-            canvas,
-            app,
-            metrics: Metrics::default(),
-            size: Vec2::new(w as f32, h as f32),
             perf: window()
                 .performance()
                 .ok_or_else(|| JsValue::from_str("window.performance is unavailable"))?,
             adapter,
-            map: Vec::new(),
-            map_w: 0,
-            map_h: 0,
+            inner: RefCell::new(Inner {
+                config,
+                canvas,
+                app,
+                metrics: Metrics::default(),
+                size: Vec2::new(w as f32, h as f32),
+                map: Vec::new(),
+                map_w: 0,
+                map_h: 0,
+            }),
         })
     }
 
     /// Resize the drawing buffer. The page owns the element, so it passes the
     /// device-pixel size it has already set on it.
-    pub fn resize(&mut self, width: u32, height: u32) {
-        self.config.width = width.max(1);
-        self.config.height = height.max(1);
-        self.size = Vec2::new(self.config.width as f32, self.config.height as f32);
-        self.surface.configure(&self.device, &self.config);
+    pub fn resize(&self, width: u32, height: u32) {
+        let config = {
+            let mut inner = self.inner.borrow_mut();
+            inner.config.width = width.max(1);
+            inner.config.height = height.max(1);
+            inner.size = Vec2::new(inner.config.width as f32, inner.config.height as f32);
+            inner.config.clone()
+        };
+        self.surface.configure(&self.device, &config);
     }
 
     /// Stop or resume the scripted camera motion, so a page can measure the
     /// same scene the harness does and then let the pointer drive it.
-    pub fn set_animate(&mut self, animate: bool) {
-        self.app.animate = animate;
+    pub fn set_animate(&self, animate: bool) {
+        self.inner.borrow_mut().app.animate = animate;
     }
 
-    pub fn pointer_down(&mut self, x: f32, y: f32) {
+    pub fn pointer_down(&self, x: f32, y: f32) {
         self.pointer(x, y, PointerPhase::Down);
     }
 
-    pub fn pointer_move(&mut self, x: f32, y: f32) {
+    pub fn pointer_move(&self, x: f32, y: f32) {
         self.pointer(x, y, PointerPhase::Move);
     }
 
-    pub fn pointer_up(&mut self, x: f32, y: f32) {
+    pub fn pointer_up(&self, x: f32, y: f32) {
         self.pointer(x, y, PointerPhase::Up);
     }
 
     /// `delta_y` positive zooms out, matching a wheel scrolled away from the
     /// user.
-    pub fn wheel(&mut self, x: f32, y: f32, delta_y: f32) {
-        self.app.wheel(
+    pub fn wheel(&self, x: f32, y: f32, delta_y: f32) {
+        let size = self.inner.borrow().size;
+        self.inner.borrow_mut().app.wheel(
             WheelEvent {
                 pos: Vec2::new(x, y),
                 delta: Vec2::new(0.0, delta_y),
             },
-            self.size,
+            size,
         );
     }
 
     /// Whether a drag is in progress, so the page can switch the cursor.
     pub fn dragging(&self) -> bool {
-        self.app.dragging()
+        self.inner.borrow().app.dragging()
     }
 
     /// One frame, timed the way the harness times one, in milliseconds.
@@ -299,9 +324,11 @@ impl CanvasHost {
     /// Measures `draw_frame` plus the queue reporting all submitted work done.
     /// The GPU wait is inside the window deliberately: CPU submit on its own is
     /// not frame time, which is the mistake the harness was corrected for.
-    pub async fn tick(&mut self) -> Result<f64, JsValue> {
+    pub async fn tick(&self) -> Result<f64, JsValue> {
         let (ms, stats) = self.frame().await?;
-        self.metrics
+        self.inner
+            .borrow_mut()
+            .metrics
             .push(Duration::from_secs_f64(ms / 1000.0), stats);
         Ok(ms)
     }
@@ -311,22 +338,24 @@ impl CanvasHost {
     ///
     /// The same warmup-then-measure shape as the harness, on the same scene, so
     /// the two lines are the same measurement rather than two similar ones.
-    pub async fn run(&mut self, warmup: u32, frames: u32) -> Result<String, JsValue> {
-        self.metrics.clear();
+    pub async fn run(&self, warmup: u32, frames: u32) -> Result<String, JsValue> {
+        self.inner.borrow_mut().metrics.clear();
         for i in 0..(warmup + frames) {
             let (ms, stats) = self.frame().await?;
             if i >= warmup {
-                self.metrics
+                self.inner
+                    .borrow_mut()
+                    .metrics
                     .push(Duration::from_secs_f64(ms / 1000.0), stats);
             }
         }
-        Ok(self.metrics.result_line(BUDGET_MS))
+        Ok(self.inner.borrow().metrics.result_line(BUDGET_MS))
     }
 
     /// The RESULT line for whatever has been measured so far. The interactive
     /// page reads this so its live numbers cannot drift from the bench's.
     pub fn result_line(&self) -> String {
-        self.metrics.result_line(BUDGET_MS)
+        self.inner.borrow().metrics.result_line(BUDGET_MS)
     }
 
     /// Adapter name and backend, for the conditions a figure has to carry.
@@ -336,7 +365,19 @@ impl CanvasHost {
 
     /// The drawing-buffer size actually being rendered, in device pixels.
     pub fn size(&self) -> String {
-        format!("{}x{}", self.config.width, self.config.height)
+        let inner = self.inner.borrow();
+        format!("{}x{}", inner.config.width, inner.config.height)
+    }
+
+    /// Current camera as `scale x y`.
+    ///
+    /// On an infinite board, "how far in am I and where am I" is the first
+    /// question, and a person dragging one deserves an answer. It is also the
+    /// only way to see that the input path did anything at all, since the board
+    /// itself is a canvas that a screenshot cannot read.
+    pub fn camera(&self) -> String {
+        let v = &self.inner.borrow().app.viewport;
+        format!("{:.3}x  x {:.0}  y {:.0}", v.scale, v.center.x, v.center.y)
     }
 
     /// An ASCII luminance map of the last [`CanvasHost::verify_pixels`] frame.
@@ -347,20 +388,20 @@ impl CanvasHost {
     /// needs no image encoder and no round trip through the DOM, which is what
     /// makes it usable at all in a headless browser.
     pub fn verify_map(&self) -> String {
-        let (mw, mh) = (self.map_w, self.map_h);
+        const RAMP: &[u8] = b" .:-=+*#%@";
+        let inner = self.inner.borrow();
+        let (mw, mh) = (inner.map_w as usize, inner.map_h as usize);
         if mw == 0 {
             return "(no readback yet)".into();
         }
-        const RAMP: &[u8] = b" .:-=+*#%@";
-        let (mw, mh) = (mw as usize, mh as usize);
         let mut out = String::with_capacity((mw + 1) * mh);
         for y in 0..mh {
             for x in 0..mw {
                 let i = (y * mw + x) * 3;
                 // Luma over the stored bytes, which is what the ramp is tuned for.
-                let lum = (self.map[i] as u32 * 30
-                    + self.map[i + 1] as u32 * 59
-                    + self.map[i + 2] as u32 * 11)
+                let lum = (inner.map[i] as u32 * 30
+                    + inner.map[i + 1] as u32 * 59
+                    + inner.map[i + 2] as u32 * 11)
                     / 100;
                 out.push(RAMP[(lum as usize * (RAMP.len() - 1) / 255).min(RAMP.len() - 1)] as char);
             }
@@ -389,9 +430,11 @@ impl CanvasHost {
     ///
     /// Advances the camera, because it draws a real frame through the real
     /// pipeline rather than a special path.
-    pub async fn verify_pixels(&mut self) -> Result<String, JsValue> {
-        let (w, h) = (self.config.width, self.config.height);
-        let format = self.config.format;
+    pub async fn verify_pixels(&self) -> Result<String, JsValue> {
+        let (w, h, format) = {
+            let inner = self.inner.borrow();
+            (inner.config.width, inner.config.height, inner.config.format)
+        };
         let target = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("verify-target"),
             size: wgpu::Extent3d {
@@ -408,13 +451,16 @@ impl CanvasHost {
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let stats = self.app.draw_frame(
-            &mut self.canvas,
-            &self.device,
-            &self.queue,
-            &view,
-            self.size,
-        );
+        // One borrow, destructured. Two `borrow_mut` calls on the same cell, or
+        // a borrow held while the other is taken, would panic at runtime rather
+        // than fail to compile.
+        let stats = {
+            let mut inner = self.inner.borrow_mut();
+            let Inner {
+                canvas, app, size, ..
+            } = &mut *inner;
+            app.draw_frame(canvas, &self.device, &self.queue, &view, *size)
+        };
         self.gpu_idle().await?;
 
         // `copy_texture_to_buffer` requires a 256-byte row alignment, so the
@@ -477,44 +523,14 @@ impl CanvasHost {
         let sampled: usize = top.iter().map(|(_, n)| n).sum();
         let hex = |c: [u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
 
-        // Box-filtered downsample for the map, from the same readback.
-        // Averaging rather than point-sampling is what makes a board of small
-        // swatches legible at 100 columns instead of aliasing into noise.
+        // Max-pooled downsample for the map, from the same readback. A mean over
+        // a block that is mostly background reports a bright thumbnail as
+        // background, so "is there real content, and how much contrast does it
+        // have" is a question about the brightest pixel in each block rather than
+        // the average one.
         const MAP_W: u32 = 120;
         let map_h = ((MAP_W as u64 * h as u64) / w as u64).max(1) as u32;
         let mut map = vec![0u8; (MAP_W * map_h * 3) as usize];
-        for my in 0..map_h {
-            let y0 = my as u64 * h as u64 / map_h as u64;
-            let y1 = (((my + 1) as u64 * h as u64) / map_h as u64)
-                .max(y0 + 1)
-                .min(h as u64);
-            for mx in 0..MAP_W {
-                let x0 = mx as u64 * w as u64 / MAP_W as u64;
-                let x1 = (((mx + 1) as u64 * w as u64) / MAP_W as u64)
-                    .max(x0 + 1)
-                    .min(w as u64);
-                let (mut acc, mut n) = ([0u32; 3], 0u32);
-                for y in y0..y1 {
-                    let row = y as usize * stride;
-                    for x in x0..x1 {
-                        let o = row + x as usize * 4;
-                        for (k, v) in acc.iter_mut().zip(&data[o..o + 3]) {
-                            *k += *v as u32;
-                        }
-                        n += 1;
-                    }
-                }
-                let o = ((my * MAP_W + mx) * 3) as usize;
-                for k in 0..3 {
-                    map[o + k] = (acc[k] / n.max(1)) as u8;
-                }
-            }
-        }
-
-        // Max-pooled luminance, because a mean over a block that is mostly
-        // background reports a bright thumbnail as background. "Is there real
-        // content, and how much contrast does it have" is a question about the
-        // brightest pixel in each block, not the average one.
         let mut peak = 0u8;
         let mut luma_hist = [0u32; 8];
         for my in 0..map_h {
@@ -546,15 +562,17 @@ impl CanvasHost {
                 }
             }
         }
-        self.map = map;
-        self.map_w = MAP_W;
-        self.map_h = map_h;
-
         // What the pipeline's clear should land as in this format. The render
         // target here is whatever the surface prefers, which is not sRGB, so the
         // clear is stored as written and comparing it through an sRGB encode
         // would report a frame of pure clear as full of content.
-        let clear = self.canvas.background;
+        let clear = self.inner.borrow().canvas.background;
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner.map = map;
+            inner.map_w = MAP_W;
+            inner.map_h = map_h;
+        }
         let byte_of = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
         let expect = [byte_of(clear[0]), byte_of(clear[1]), byte_of(clear[2])];
 
@@ -598,23 +616,32 @@ async fn map_read(buffer: &wgpu::Buffer, range: std::ops::Range<u64>) -> Result<
 }
 
 impl CanvasHost {
-    fn pointer(&mut self, x: f32, y: f32, phase: PointerPhase) {
-        self.app.pointer(
+    fn pointer(&self, x: f32, y: f32, phase: PointerPhase) {
+        let mut inner = self.inner.borrow_mut();
+        let size = inner.size;
+        inner.app.pointer(
             PointerEvent {
                 pos: Vec2::new(x, y),
                 phase,
             },
-            self.size,
+            size,
         );
     }
 
-    async fn frame(&mut self) -> Result<(f64, FrameStats), JsValue> {
+    /// One frame, submitted and presented, then waited on.
+    ///
+    /// The mutable borrow is released before the await. That is the whole reason
+    /// this method takes `&self`: holding a `&mut self` across the GPU wait would
+    /// make every pointer event that arrived during a frame a re-entrant borrow,
+    /// and `wasm-bindgen` turns that into a thrown panic.
+    async fn frame(&self) -> Result<(f64, FrameStats), JsValue> {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
                 // The element changed size under us. Reconfigure and report a
                 // skipped frame rather than counting a reconfigure as a fast one.
-                self.surface.configure(&self.device, &self.config);
+                let config = self.inner.borrow().config.clone();
+                self.surface.configure(&self.device, &config);
                 return Err(JsValue::from_str("surface reconfigured"));
             }
             Err(e) => return Err(err("get_current_texture", e)),
@@ -624,14 +651,15 @@ impl CanvasHost {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let start = self.perf.now();
-        let stats = self.app.draw_frame(
-            &mut self.canvas,
-            &self.device,
-            &self.queue,
-            &view,
-            self.size,
-        );
+        let stats = {
+            let mut inner = self.inner.borrow_mut();
+            let Inner {
+                canvas, app, size, ..
+            } = &mut *inner;
+            app.draw_frame(canvas, &self.device, &self.queue, &view, *size)
+        };
         frame.present();
+
         self.gpu_idle().await?;
         Ok((self.perf.now() - start, stats))
     }

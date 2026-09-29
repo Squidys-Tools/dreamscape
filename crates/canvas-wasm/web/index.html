@@ -160,19 +160,34 @@
           };
           board.addEventListener("pointerdown", (e) => {
             dragging = true;
-            board.setPointerCapture(e.pointerId);
+            // The host call comes first on purpose. `setPointerCapture` throws
+            // if the pointer id is not one the browser considers active, and it
+            // did exactly that here, which meant an exception fired before the
+            // press ever reached the canvas and panning silently never started.
+            // Capture is the part that keeps receiving moves once the cursor
+            // leaves the element; it is not the part that begins a drag.
             host.pointer_down(...at(e));
+            try {
+              board.setPointerCapture(e.pointerId);
+            } catch {
+              /* moving outside the canvas will just end the drag early */
+            }
           });
           board.addEventListener("pointermove", (e) => {
             host.pointer_move(...at(e));
             board.style.cursor = dragging ? "grabbing" : "grab";
           });
+          // On the window as well as the element, so a release that lands
+          // outside the canvas, or a capture that failed, still ends the drag
+          // instead of leaving the board stuck to the pointer.
           const release = (e) => {
+            if (!dragging) return;
             dragging = false;
             host.pointer_up(...at(e));
           };
           board.addEventListener("pointerup", release);
           board.addEventListener("pointercancel", release);
+          window.addEventListener("pointerup", release);
           board.addEventListener(
             "wheel",
             (e) => {
@@ -190,7 +205,8 @@
               () => {
                 show(
                   `<b>${host.result_line()}</b>\n${verify}\nadapter  ${host.adapter()}\n` +
-                    `size     ${host.size()}\ndrag to pan, wheel to zoom`,
+                    `size     ${host.size()}\ncamera   ${host.camera()}\n` +
+                    `drag to pan, wheel to zoom`,
                 );
                 requestAnimationFrame(loop);
               },

@@ -448,18 +448,54 @@ conditions problem and it is worse than the native path's, not better.
 
 **Colour has not been confirmed end to end.** The surface reports no sRGB format
 on this machine, so the target is `Bgra8Unorm` and the renderer's linear output is
-stored without an encode. The board rasterises and has real dynamic range
-(`distinct=8,287` colours, 28% of sampled pixels off the clear colour), but
-whether it is *correct* is unverified, and the honest next step is a
-max-pooled luminance readback rather than another guess. Native hosts pass
-`Rgba8UnormSrgb` explicitly and are unaffected.
+stored without an encode. The board does rasterise, and it has real tonal range
+once you look for it: a max-pooled readback of a 2,000-item board reports a peak
+luminance of 255 with the map cells spread across all eight luma buckets, and the
+ASCII map shows a field of varied values rather than a flat fill. Whether the
+colours are *correct* is still unverified, and the honest next step is a
+max-pooled luminance readback on a machine that does offer an sRGB surface. Native
+hosts pass `Rgba8UnormSrgb` explicitly and are unaffected.
 
-**A headless browser cannot confirm presentation.** The page screenshot came back
-blank for the canvas and `createImageBitmap` on it read an empty layer, while a
-2D-canvas control read back correctly through the same code. A frame that was
-submitted and never painted, and a frame that was painted and never composited,
-look identical from outside and mean opposite things. GPU readback distinguishes
-the renderer; only a headed browser can settle the compositor.
+**A headless browser will not confirm that a WebGPU canvas is presented.** The
+page screenshot came back blank for the canvas and `createImageBitmap` on the
+canvas read an empty layer, while a 2D control read back correctly through the same
+code. A frame that was submitted and never painted, and a frame that was painted
+and never composited, look identical from outside and mean opposite things. GPU
+readback distinguishes the renderer; only a headed browser can settle the
+compositor.
+
+### Two bugs the interactive path hid, both from never running it
+
+The measured path was the only one ever exercised, and it was fine. The
+interactive path, where a person drives the camera, was dead in two ways and
+neither showed up until a browser sent real pointer and wheel events at it.
+
+**`setPointerCapture` ran before the press reached the canvas.** It throws
+`NotFoundError` whenever the pointer id is not one the browser considers active,
+and it did exactly that under a scripted press. The exception fired first, so
+`host.pointer_down` never ran and panning silently did nothing at all. The fix is
+ordering, and it is a real fix rather than a workaround: capture is what keeps
+receiving moves once the cursor leaves the element, it is not what begins a drag,
+so it belongs after the essential call and inside a guard.
+
+**An exported `&mut self` that awaits is a re-entrancy trap.** `tick()` held its
+mutable borrow across the GPU wait, which is the whole measured frame. Any pointer
+event arriving inside that window re-entered the same object and `wasm-bindgen`
+threw `recursive use of an object detected which would lead to unsafe aliasing in
+rust`, once per event, in a page that looked otherwise healthy. This is not a
+headless artefact. A real person dragging while frames are in flight would hit it
+constantly, and it would look like dropped input rather than a crash.
+
+The fix is that no exported method holds a mutable borrow across an await: the
+mutable state moved behind one `RefCell` and every export takes `&self`, so a
+borrow lives for a few statements and is dropped before anything suspends. The
+browser can then call in whenever it likes, and after the change the same scripted
+drag moves the camera and the page reports zero exceptions.
+
+The general rule is worth keeping: **a `&mut self` method that awaits is a
+borrowed gun, and in a single-threaded host with an event loop it fires on the
+first event that lands mid-frame.**
+
 
 ### The toolchain is not what this document claimed
 
