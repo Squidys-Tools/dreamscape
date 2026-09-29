@@ -57,12 +57,12 @@
       "icon": "play"
     },
     {
-      "name": "Run iced host (never draws, SQU-73)",
+      "name": "Run iced host (re-test, was blank)",
       "command": "cargo run -p host-iced --release",
       "icon": "debug"
     },
     {
-      "name": "Run surface probe (never draws, SQU-73)",
+      "name": "Run surface probe (should be magenta, SQU-73)",
       "command": "cargo run -p probe-surface --release",
       "icon": "debug"
     }
