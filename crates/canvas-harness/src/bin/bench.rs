@@ -3,9 +3,9 @@
 //! This is the floor. The three UI hosts add chrome on top of exactly this
 //! pipeline, so their numbers are only meaningful relative to it.
 
-use canvas_app::{Config, Motion};
+use canvas_app::{Config, Motion, BUDGET_MS};
 use canvas_gpu::AtlasConfig;
-use canvas_harness::{machine_line, report, run, RunConfig};
+use canvas_harness::{report, run, RunConfig};
 
 fn arg(name: &str, default: &str) -> String {
     std::env::args()
@@ -50,6 +50,6 @@ fn main() {
     );
 
     let r = run(&cfg);
-    print!("{}", report(&r.metrics, &r.adapter, 16.67));
-    println!("{}", machine_line(&r.metrics, 16.67));
+    print!("{}", report(&r.metrics, &r.adapter, BUDGET_MS));
+    println!("{}", r.metrics.result_line(BUDGET_MS));
 }

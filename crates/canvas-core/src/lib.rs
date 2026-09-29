@@ -88,6 +88,14 @@ impl Rect {
     }
 }
 
+/// Camera bounds, in device pixels per world unit.
+///
+/// A zoom limit is not a UI nicety. `scale` multiplies every item's screen size
+/// on the way into the instance buffer, so an unbounded zoom overflows that
+/// transform and dissolves the board long before the user is lost.
+pub const MIN_SCALE: f32 = 0.02;
+pub const MAX_SCALE: f32 = 8.0;
+
 /// Camera state. `scale` is device pixels per world unit.
 #[derive(Clone, Copy, Debug)]
 pub struct Viewport {
@@ -123,6 +131,107 @@ impl Viewport {
             (p.x - size.x * 0.5) / self.scale + self.center.x,
             (p.y - size.y * 0.5) / self.scale + self.center.y,
         )
+    }
+
+    /// Put `world` at `screen`, moving the camera rather than the scale.
+    ///
+    /// `screen_to_world` inverted. Everything that pins a world point to a
+    /// pixel is this, so there is one place where the axis signs live.
+    pub fn center_on(&mut self, world: Vec2, screen: Vec2, size: Vec2) {
+        self.center = Vec2::new(
+            world.x - (screen.x - size.x * 0.5) / self.scale,
+            world.y - (screen.y - size.y * 0.5) / self.scale,
+        );
+    }
+
+    /// Multiply the scale, keeping the world point under `cursor` under it.
+    ///
+    /// Zooming about the viewport centre instead is the classic way to make a
+    /// canvas feel like it is sliding out from under you: the thing you aimed at
+    /// is always the thing that moves furthest.
+    pub fn zoom_at(&mut self, factor: f32, cursor: Vec2, size: Vec2) {
+        let next = (self.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
+        if next == self.scale {
+            return;
+        }
+        let anchor = self.screen_to_world(cursor, size);
+        self.scale = next;
+        self.center_on(anchor, cursor, size);
+    }
+}
+
+/// Where a pointer is in its press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerPhase {
+    Down,
+    Move,
+    Up,
+}
+
+/// A pointer event in device pixels, relative to the canvas.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerEvent {
+    pub pos: Vec2,
+    pub phase: PointerPhase,
+}
+
+/// A wheel or trackpad scroll in device pixels, relative to the canvas.
+///
+/// `delta.y` positive is scrolling away from the user, which zooms out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WheelEvent {
+    pub pos: Vec2,
+    pub delta: Vec2,
+}
+
+/// Zoom per wheel pixel. A notch is roughly 100px, so this is about a fifth of a
+/// scale step per notch, which is slow enough to aim and fast enough to cross a
+/// board in a few flicks.
+const WHEEL_ZOOM_PER_PIXEL: f32 = 0.002;
+
+/// Camera manipulation from host input.
+///
+/// Every host pans and zooms the same way, so this lives beside `Viewport`
+/// rather than in either host: a browser and a native toolkit disagreeing about
+/// what a drag means is the kind of difference that only shows up as a bug
+/// report from one of them.
+///
+/// The drag pins the grabbed world point to the cursor rather than accumulating
+/// per-frame pointer deltas. Accumulated deltas re-grab nothing, so the item
+/// under the cursor creeps away from it by however much the scale changed
+/// mid-drag, and it does so on every trackpad frame, where the scale never stops
+/// moving.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CameraControl {
+    /// World point grabbed on `Down`, or `None` when no drag is in progress.
+    grab: Option<Vec2>,
+}
+
+impl CameraControl {
+    /// Is a drag in progress. Hosts use this to decide the cursor.
+    pub fn dragging(&self) -> bool {
+        self.grab.is_some()
+    }
+
+    pub fn pointer(&mut self, view: &mut Viewport, ev: PointerEvent, size: Vec2) {
+        match ev.phase {
+            PointerPhase::Down => self.grab = Some(view.screen_to_world(ev.pos, size)),
+            PointerPhase::Move => {
+                if let Some(world) = self.grab {
+                    view.center_on(world, ev.pos, size);
+                }
+            }
+            // Releasing outside the canvas still arrives as `Up` in every host we
+            // care about, and a stale grab would pan on the next hover.
+            PointerPhase::Up => self.grab = None,
+        }
+    }
+
+    pub fn wheel(&mut self, view: &mut Viewport, ev: WheelEvent, size: Vec2) {
+        // Clamped per event because a trackpad pinch reports a delta large enough
+        // to jump from the minimum scale to the maximum in a single frame.
+        let factor = (1.0 - ev.delta.y * WHEEL_ZOOM_PER_PIXEL).clamp(0.5, 2.0);
+        view.zoom_at(factor, ev.pos, size);
     }
 }
 
@@ -510,5 +619,154 @@ mod tests {
         let loose = cull(&mut grid, &view, Vec2::new(800.0, 600.0), 128.0);
         assert!(tight.is_empty(), "outside the viewport with no margin");
         assert_eq!(loose.len(), 1, "margin should keep it resident");
+    }
+
+    fn under_cursor(v: &Viewport, world: Vec2, cursor: Vec2, size: Vec2) -> f32 {
+        (v.world_to_screen(world, size) - cursor).x.abs()
+    }
+
+    #[test]
+    fn zoom_at_keeps_the_point_under_the_cursor_fixed() {
+        let size = Vec2::new(1600.0, 900.0);
+        // Off-centre on purpose: a cursor at the viewport centre cannot tell
+        // anchored zoom apart from zoom about the centre.
+        let cursor = Vec2::new(1310.0, 180.0);
+        let mut view = Viewport {
+            center: Vec2::new(400.0, -200.0),
+            scale: 0.5,
+        };
+        let anchor = view.screen_to_world(cursor, size);
+        for factor in [1.25, 0.8, 1.1, 1.0] {
+            view.zoom_at(factor, cursor, size);
+            assert!(
+                under_cursor(&view, anchor, cursor, size) < 1e-2,
+                "anchored zoom drifted at factor {factor}"
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_at_clamps_to_the_scale_bounds() {
+        let size = Vec2::new(800.0, 600.0);
+        let cursor = Vec2::new(400.0, 300.0);
+        let mut view = Viewport::default();
+        for _ in 0..40 {
+            view.zoom_at(2.0, cursor, size);
+        }
+        assert_eq!(view.scale, MAX_SCALE, "clamped at the top");
+        for _ in 0..80 {
+            view.zoom_at(0.5, cursor, size);
+        }
+        assert_eq!(view.scale, MIN_SCALE, "clamped at the bottom");
+    }
+
+    #[test]
+    fn drag_holds_the_grabbed_point_under_the_cursor_through_a_zoom() {
+        // The failure this guards against is subtle: panning by a per-frame
+        // pointer delta while the scale changes mid-drag makes the grabbed item
+        // creep away from the cursor, and only on a trackpad, where the scale
+        // never stops moving.
+        let size = Vec2::new(1600.0, 900.0);
+        let cursor = Vec2::new(520.0, 640.0);
+        let mut view = Viewport {
+            center: Vec2::new(-120.0, 60.0),
+            scale: 0.4,
+        };
+        let mut control = CameraControl::default();
+        control.pointer(
+            &mut view,
+            PointerEvent {
+                pos: cursor,
+                phase: PointerPhase::Down,
+            },
+            size,
+        );
+        let grabbed = view.screen_to_world(cursor, size);
+
+        let moved = Vec2::new(903.0, 71.0);
+        control.pointer(
+            &mut view,
+            PointerEvent {
+                pos: moved,
+                phase: PointerPhase::Move,
+            },
+            size,
+        );
+        assert!(
+            under_cursor(&view, grabbed, moved, size) < 1e-2,
+            "drag should carry the grabbed point exactly"
+        );
+
+        // Zoom without releasing, then keep dragging.
+        control.wheel(
+            &mut view,
+            WheelEvent {
+                pos: moved,
+                delta: Vec2::new(0.0, -400.0),
+            },
+            size,
+        );
+        let elsewhere = Vec2::new(300.0, 200.0);
+        control.pointer(
+            &mut view,
+            PointerEvent {
+                pos: elsewhere,
+                phase: PointerPhase::Move,
+            },
+            size,
+        );
+        assert!(
+            under_cursor(&view, grabbed, elsewhere, size) < 1e-2,
+            "the grab must survive a zoom mid-drag"
+        );
+    }
+
+    #[test]
+    fn moving_without_a_press_does_not_pan_and_releasing_ends_the_drag() {
+        let size = Vec2::new(800.0, 600.0);
+        let mut view = Viewport {
+            center: Vec2::new(50.0, 50.0),
+            scale: 1.0,
+        };
+        let mut control = CameraControl::default();
+        control.pointer(
+            &mut view,
+            PointerEvent {
+                pos: Vec2::new(100.0, 100.0),
+                phase: PointerPhase::Move,
+            },
+            size,
+        );
+        assert_eq!(view.center, Vec2::new(50.0, 50.0), "hover is not a drag");
+
+        control.pointer(
+            &mut view,
+            PointerEvent {
+                pos: Vec2::new(100.0, 100.0),
+                phase: PointerPhase::Down,
+            },
+            size,
+        );
+        assert!(control.dragging());
+        control.pointer(
+            &mut view,
+            PointerEvent {
+                pos: Vec2::new(120.0, 100.0),
+                phase: PointerPhase::Up,
+            },
+            size,
+        );
+        assert!(!control.dragging());
+
+        let settled = view.center;
+        control.pointer(
+            &mut view,
+            PointerEvent {
+                pos: Vec2::new(400.0, 100.0),
+                phase: PointerPhase::Move,
+            },
+            size,
+        );
+        assert_eq!(view.center, settled, "a stale grab would pan on hover");
     }
 }

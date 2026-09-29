@@ -5,3 +5,6 @@
 # bench.ps1 -ResultLog writes its capture wherever it is pointed, and the
 # documented invocation points it at the repo root.
 /bench*.txt
+# wasm-pack output. Generated on every build, and rebuilding it is the whole
+# point of the browser host.
+/crates/canvas-wasm/pkg

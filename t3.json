@@ -3,7 +3,7 @@
   "scripts": [
     {
       "name": "Check everything",
-      "command": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo test -p canvas-core",
+      "command": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo check -p canvas-wasm --target wasm32-unknown-unknown && cargo check -p canvas-wasm --target wasm32-unknown-unknown --features webgl && cargo test -p canvas-core",
       "icon": "test"
     },
     {
@@ -13,7 +13,7 @@
     },
     {
       "name": "Typecheck",
-      "command": "cargo check --workspace --all-targets",
+      "command": "cargo check --workspace --all-targets && cargo check -p canvas-wasm --target wasm32-unknown-unknown",
       "icon": "lint"
     },
     {
@@ -44,6 +44,16 @@
     {
       "name": "Bench 8k single",
       "command": "cargo run -p canvas-harness --bin bench --release -- --items=8000 --textures=8000",
+      "icon": "play"
+    },
+    {
+      "name": "Browser canvas (interactive)",
+      "command": ".\\scripts\\web-bench.ps1 -NoOpen",
+      "icon": "play"
+    },
+    {
+      "name": "Browser canvas (measured)",
+      "command": ".\\scripts\\web-bench.ps1 -Scenario quick -ResultLog bench-web.txt",
       "icon": "play"
     },
     {

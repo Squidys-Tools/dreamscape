@@ -82,22 +82,29 @@ We need to be on the same page with terminology. When communicating, use this la
 
 3. **Killing by pattern, or blocking on a sleep.** Never `Stop-Process -Name`, `pkill -f`, or kill a PID found by matching a name or path. This repo runs inside T3 Code and the machine runs other things. Kill only a PID you captured at spawn. Never `Start-Sleep` after launching a bench or a server: start it detached, do other work, then poll its log.
 
-4. **Committing generated output or a machine-specific path.** `canvas-wasm/pkg/` is `wasm-pack` output. Never hardcode an absolute user path, a machine-specific cache location, or a localhost port into source or committed config. A fresh clone on another Windows machine has to work.
+4. **Committing generated output or a machine-specific path.** `crates/canvas-wasm/pkg/` is `wasm-pack` output. Never hardcode an absolute user path, a machine-specific cache location, or a localhost port into source or committed config. A fresh clone on another Windows machine has to work. The web host binds port 0 and prints the port it got, for the same reason `bench.ps1` captures a RESULT line rather than reading a console table.
 
 ## Hit every surface
 
 The common defect here is a change that works on the path you tested and is missing everywhere else. Before calling work done, walk this list and say which entries applied.
 
 - **Entry points.** The per-frame pipeline is reached by `canvas-harness`, by `host-iced`, and later by the WASM host and the server. A change to `AppState::draw_frame` has to hold in all of them, not just the one you ran.
-- **Targets.** Native and `wasm32-unknown-unknown`. Platform-specific dependencies in a shared crate erode the layering that lets one renderer serve both, so check that `canvas-core`, `canvas-gpu` and `canvas-app` still build for a target that has no window system.
+- **Targets.** Native and `wasm32-unknown-unknown`, and the wasm one is now a build that the "Check everything" script runs rather than an aspiration. There is no CI yet, which is the gap: nothing catches a target-specific regression but whoever runs the script. Platform-specific dependencies in a shared crate erode the layering that lets one renderer serve both, so check that `canvas-core`, `canvas-gpu` and `canvas-app` still build for a target that has no window system. `pollster` is the trap to look for: it compiles for wasm and cannot work there.
 - **Metrics.** A field flows from `FrameStats` to the `RESULT` line to `bench.ps1` to the report to the table in the docs. All of them or none. See principle 3.
 - **Reverse states.** A new bench scenario needs a row in the docs table. A new crate needs removing from the workspace when it goes, and its dependency tree out of `Cargo.lock`. Adding a way in without a way out is a bug.
 - **Docs.** Check whether the change makes existing guidance inaccurate. Apply the documentation rules before adding anything new.
 
 ## Running things
 
-- Rust 1.92, pinned as `rust-version` in the workspace `Cargo.toml`. `cargo` is the only build tool for the Rust side.
-- `wasm32-unknown-unknown` is already installed. No `rustup target add` needed.
+- Rust 1.92 is the floor in `rust-version`. There is no pinned channel, so a
+  machine with a newer rustc builds with the newer rustc; see the known-broken
+  list, because a second Rust install on `PATH` outranks rustup.
+- `wasm32-unknown-unknown` is declared in `rust-toolchain.toml`, so `rustup`
+  installs the target's std on the clone that needs it. Do not remove that line
+  and do not trust `rustup target list --installed` as proof the target works:
+  this repository shipped a claim that it was installed while the target's lib
+  directory was empty, and every wasm build failed with `can't find crate for
+  core`.
 - **bun for all JavaScript work.** Not npm, not yarn, not pnpm. bun 1.4.2 is on PATH.
 - `just` is not installed, so nothing may invoke it. Project commands are registered in `t3.json` at the repo root, and that is what the T3 Code scripts menu runs.
 - **The manifest filename is not ours to choose.** T3 Code hard-codes `t3.json` and silently ignores any other name, so do not rename it to `dreamscape.json` or anything else. Verified against the installed bundle: the lookup passes the literal `t3.json`, and the invalid-manifest message is hard-coded to that name too. The repo can have a different name than the file.
@@ -143,20 +150,23 @@ Full reasoning, and the findings that shaped it, in `docs/spikes/canvas-spike.md
 
 ## Where code lives
 
-- `crates/canvas-core` is the item model, viewport, spatial hash, culling and LOD. No GPU, no platform dependencies, 10 unit tests. Most of the correctness risk lives here.
+- `crates/canvas-core` is the item model, viewport, spatial hash, culling, LOD and the camera maths pan and zoom need. No GPU, no platform dependencies, 14 unit tests. Most of the correctness risk lives here.
 - `crates/canvas-gpu` is the wgpu renderer: fixed-slot atlas, lazy per-level allocation, eviction, one instanced draw call.
 - `crates/canvas-app` is the scene, camera, selection, search and the per-frame pipeline. Every consumer links this, so the only thing that differs between them is how the chrome is drawn.
 - `crates/canvas-harness` is the headless driver over `canvas-app` plus frame metrics. No asset files.
+- `crates/canvas-wasm` is the browser host, and the only crate that may depend on `wasm-bindgen`. It is thin on purpose: it owns a GPU context, a clock and the compositor, and nothing else. `web/` is the page, the local server and the capture endpoint; `pkg/` is generated.
 - `crates/host-iced` is an iced 0.14 host sharing one wgpu device with the canvas. It compiles and has never rendered a pixel; see the known-broken list.
 - `crates/probe-surface` is a throwaway raw winit plus wgpu control. Delete it once presentation works.
-- `scripts/bench.ps1` is the benchmark runner. `docs/spikes/canvas-spike.md` is the only internals document.
+- `scripts/bench.ps1` is the native benchmark runner, `scripts/web-bench.ps1` the browser one. `docs/spikes/canvas-spike.md` is the only internals document.
 
 ## Known broken
 
 Recorded so nobody re-derives the failure. Tracked in Linear.
 
-- **`cargo run -p host-iced` opens a window and never draws.** SQU-73. This is a machine-level presentation failure, not a bug in the host. A raw winit plus wgpu probe presents 180+ frames with `present()` returning `Ok` and no wgpu errors, and the client area still shows nothing. Confirmed while foregrounded, and in a full-desktop capture where other GPU-composited windows render normally.
-- **The published frame-time table no longer matches what the harness prints.** `docs/spikes/canvas-spike.md` measured CPU submit alone. `FrameStats` no longer carries a clock, the host owns timing, and the harness now measures `draw_frame` **plus** a hard `device.poll(Wait)`. The caption claimed the newer definition while the numbers were taken under the older one. Until the table is re-measured on a quiet machine, treat its positions as indicative and its caption as corrected, not its numbers.
+- **`cargo run -p host-iced` opens a window and never draws.** SQU-73. A raw winit plus wgpu probe presents 180+ frames with `present()` returning `Ok` and no wgpu errors, and the client area still shows nothing. Confirmed while foregrounded, and in a full-desktop capture where other GPU-composited windows render normally. Those observations were taken while the canvas vertex shader was clipping every quad, so the canvas half of the blank window was this repo's bug and has been fixed; whether anything remains is unretested. Do not assume SQU-73 is closed or that it is open.
+- **Every frame time in this repository was measured on a canvas that drew nothing.** The vertex shader put device pixels straight into clip space, so every quad was clipped and the clear colour was the whole frame. No harness looked at a pixel, so every counter-based metric read healthy. Fixed in the renderer, and `canvas-wasm`'s `verify_pixels` exists because a screenshot and a `RESULT` line both failed to notice. Until the table is re-measured on a quiet machine, treat every published figure as a lower bound and re-derive it rather than citing it.
+- **A second Rust install can shadow the rustup one.** Cargo resolves `rustc` from `PATH`, so on a machine where a standalone install comes first, cross-target builds fail with `can't find crate for core` and native builds quietly use a different compiler than the documented floor. Check `rustc --version` against `rustup show` before believing a toolchain problem is a target problem.
+- **A headless browser will not confirm that a WebGPU canvas is presented.** The page screenshot is blank and `createImageBitmap` on the canvas reads an empty layer, while a 2D control reads back correctly through the same code. Verify the renderer with GPU readback; verify the compositor with a headed browser.
 
 ## Taste
 

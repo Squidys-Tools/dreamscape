@@ -1,0 +1,221 @@
+<!doctype html>
+<!--
+  The browser half of the canvas spike. Everything under `pkg/` is wasm-pack
+  output and is not committed.
+
+  Scenario parameters come off the query string and are named exactly as the
+  matching `bench` flags are, so one scenario can be described to both runners
+  and the two RESULT lines can be read next to each other. Anything left off
+  takes the same default the Rust side does.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>dreamscape canvas - browser host</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        background: #101014;
+        color: #d8d8e0;
+        font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      }
+      #board {
+        display: block;
+        width: 100vw;
+        height: 70vh;
+        background: #17171c;
+        touch-action: none;
+      }
+      #readout { padding: 10px 14px; white-space: pre-wrap; }
+      #readout b { color: #8ad7ff; font-weight: 600; }
+      .err { color: #ff8f8f; }
+    </style>
+  </head>
+  <body>
+    <canvas id="board"></canvas>
+    <div id="readout">loading…</div>
+
+    <script type="module">
+      import init, { CanvasHost } from "../pkg/canvas_wasm.js";
+
+      const q = new URLSearchParams(location.search);
+      const num = (name, fallback) => {
+        const raw = q.get(name);
+        if (raw === null) return fallback;
+        const v = Number(raw);
+        if (!Number.isFinite(v)) throw new Error(`${name}=${raw} is not a number`);
+        return v;
+      };
+
+      // The measured run, when `bench=1`. Same defaults as the harness so the
+      // two agree without anyone having to remember a second set of numbers.
+      const scene = {
+        items: num("items", 2000),
+        textures: num("textures", 2000),
+        atlas: num("atlas", 2048),
+        extent: num("extent", 1000),
+        pan: num("pan", 18),
+        zoom: num("zoom", 0.7),
+      };
+      const warmup = num("warmup", 120);
+      const frames = num("frames", 200);
+      const bench = q.get("bench") === "1";
+      const backend = q.get("backend") ?? "auto";
+
+      // Device pixels, matching the harness viewport when given. A CSS-scaled
+      // canvas is multiplied exactly once, here, so the pointer coordinates the
+      // host receives are the device pixels it renders in.
+      //
+      // `width` and `height` are already device pixels. They name a viewport to
+      // match the native runner's, and scaling them by the device pixel ratio
+      // would quietly render a larger board than the number claims - which is
+      // how a comparable figure becomes a different measurement.
+      const dpr = num("dpr", window.devicePixelRatio || 1);
+      const board = document.getElementById("board");
+      const readout = document.getElementById("readout");
+      const fixedWidth = num("width", 0);
+      const fixedHeight = num("height", 0);
+
+      const sizeCanvas = () => {
+        const w = fixedWidth || Math.round(board.clientWidth * dpr);
+        const h = fixedHeight || Math.round(board.clientHeight * dpr);
+        board.width = Math.max(1, w);
+        board.height = Math.max(1, h);
+        return [board.width, board.height];
+      };
+
+      const show = (html, cls = "") => {
+        readout.className = cls;
+        readout.innerHTML = html;
+      };
+
+      try {
+        await init();
+        const [w, h] = sizeCanvas();
+        const host = await CanvasHost.create(
+          board,
+          scene.items,
+          scene.textures,
+          scene.atlas,
+          scene.extent,
+          scene.pan,
+          scene.zoom,
+          bench,
+          backend,
+        );
+        host.resize(w, h);
+
+        const describe = (result, verify) => ({
+          adapter: host.adapter(),
+          size: host.size(),
+          backend,
+          scene,
+          warmup,
+          frames,
+          result,
+          verify,
+        });
+
+        // Asked once up front so the page says whether it is drawing something
+        // even if the compositor is not showing it.
+        const verify = await host.verify_pixels();
+
+        if (bench) {
+          show(`measuring ${frames} frames after ${warmup} warmup…`);
+          const result = await host.run(warmup, frames);
+          // Read the render target back rather than trusting the canvas: a
+          // headless browser will happily screenshot a WebGPU canvas it never
+          // composited, and that is indistinguishable from a renderer that drew
+          // nothing.
+          const after = await host.verify_pixels();
+          show(
+            `<b>${result}</b>\n${after}\nadapter  ${host.adapter()}\n` +
+              `size     ${host.size()}\nbackend  ${backend}\n` +
+              `scene    ${scene.items} items, ${scene.textures} distinct, ` +
+              `extent ${scene.extent}, pan ${scene.pan}, zoom ${scene.zoom}\n` +
+              `<pre style="margin:8px 0 0">${host.verify_map()}</pre>`,
+          );
+          // Hand the line to the capture server. Reading it off a screenshot is
+          // transcription, and a transcribed figure is not a reproducible one.
+          await fetch("/result", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(describe(result, after)),
+          });
+        } else {
+          // Interactive: the same seam, driven by the compositor instead of a
+          // frame count. Motion is off so the pointer owns the camera.
+          let dragging = false;
+          // Derived from the element's own geometry rather than from
+          // `devicePixelRatio`: the two only agree when the CSS box happens to be
+          // the viewport the buffer was sized from, and this page can force a
+          // buffer size the CSS box knows nothing about.
+          const at = (e) => {
+            const r = board.getBoundingClientRect();
+            return [
+              (e.clientX - r.left) * (board.width / r.width),
+              (e.clientY - r.top) * (board.height / r.height),
+            ];
+          };
+          board.addEventListener("pointerdown", (e) => {
+            dragging = true;
+            board.setPointerCapture(e.pointerId);
+            host.pointer_down(...at(e));
+          });
+          board.addEventListener("pointermove", (e) => {
+            host.pointer_move(...at(e));
+            board.style.cursor = dragging ? "grabbing" : "grab";
+          });
+          const release = (e) => {
+            dragging = false;
+            host.pointer_up(...at(e));
+          };
+          board.addEventListener("pointerup", release);
+          board.addEventListener("pointercancel", release);
+          board.addEventListener(
+            "wheel",
+            (e) => {
+              e.preventDefault();
+              host.wheel(...at(e), e.deltaY);
+            },
+            { passive: false },
+          );
+
+          // One measured frame per animation frame, paced by the GPU wait
+          // inside it, so the number on screen means the same thing the RESULT
+          // line means.
+          const loop = () => {
+            host.tick().then(
+              () => {
+                show(
+                  `<b>${host.result_line()}</b>\n${verify}\nadapter  ${host.adapter()}\n` +
+                    `size     ${host.size()}\ndrag to pan, wheel to zoom`,
+                );
+                requestAnimationFrame(loop);
+              },
+              (e) => {
+                // A reconfigure reports itself rather than counting as a frame.
+                if (String(e).includes("reconfigured")) {
+                  host.resize(board.width, board.height);
+                  requestAnimationFrame(loop);
+                } else {
+                  show(String(e), "err");
+                }
+              },
+            );
+          };
+          requestAnimationFrame(loop);
+        }
+      } catch (e) {
+        show(String(e), "err");
+        // Still report, so a failed run leaves a trace instead of a blank page.
+        await fetch("/result", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ error: String(e), backend, scene }),
+        }).catch(() => {});
+      }
+    </script>
+  </body>
+</html>

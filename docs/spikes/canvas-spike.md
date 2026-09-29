@@ -56,41 +56,86 @@ than the mean.
 Every scenario below is a **full board**: all items on screen at once. That is
 the case SQU-60 specifies, and until recently it was not what was being measured.
 
-### Frame times, and what they were actually measuring
+### Every frame time before this commit was measured on a blank canvas
 
-| Scenario | Peak visible | Mean | p99 | Max | Over budget | Degraded |
+The vertex shader built its clip-space position from device pixels directly:
+
+```wgsl
+out.pos = vec4<f32>(rect.xy + c * rect.zw, 0.0, 1.0);
+```
+
+Clip space is -1..1. A 2,560-pixel-wide board put every quad at clip coordinates
+of 0..2,560, so **every quad was clipped away and nothing was ever rasterised.**
+The clear colour was the entire frame, on every target, for the life of the
+spike.
+
+Nothing in the harness could have caught it, because nothing in the harness
+looked at a pixel. Culling, LOD, atlas residency, eviction, the `RESULT` line and
+all three frame-time columns are computed entirely on the CPU. A board of 2,000
+items that renders nothing costs the CPU work of deciding what to draw 2,000
+times, which is why the numbers looked comfortable.
+
+It was found in the browser, by `canvas-wasm`'s `verify_pixels`, which reads the
+render target back off the GPU and reports the colour histogram. The first
+browser frame came back `distinct=1`: one colour, 100,800 samples, no structure.
+The fix is a projection uniform carrying the target size, so the pixel-to-clip
+conversion happens in the vertex shader where the rest of the transform lives:
+
+```wgsl
+let px = rect.xy + c * rect.zw;
+out.pos = vec4<f32>(px.x / view.size.x * 2.0 - 1.0, 1.0 - px.y / view.size.y * 2.0, 0.0, 1.0);
+```
+
+A second bug came out of the same investigation. `AppState::new` built itself
+with `motion: Motion::default()` and never read `cfg.motion`, so **every
+`--pan` and `--zoom` flag a runner passed was accepted and discarded.** The
+`scale` scenario asked for a still board with `--pan=0` and got a panning one,
+under a row label reading "all on screen". The rows were still full boards,
+because density comes from `Config::extent` rather than from motion, so the
+`Degraded` column below survives; the scenario *names* did not.
+
+**So: the frame times in this document are void, and the table that follows is
+the first one measured on a renderer that draws.** What replaces them was
+captured on a machine running an agent session, at 45-61% CPU, so it is a sample
+under load and not a result. It is in the table because a lower bound nobody can
+reproduce is what got us here.
+
+### Frame times, first measurement on a renderer that draws
+
+`.\scripts\bench.ps1 -Scenario scale -ResultLog bench-after-renderer-fix.txt`,
+captured at 46% CPU before and 51% after. Atlas 2,048, 2560x1440, 150 frames,
+everything on screen.
+
+| Items / distinct | Peak visible | Mean | p99 | Max | Over budget | Degraded |
 |---|---|---|---|---|---|---|
-| 2,000 items / 2,000 distinct | 2,000 | 1.2-1.3ms | 2.3ms | 2.5-3.5ms | 0/200 | 74.21% |
-| 8,000 items / 8,000 distinct | 8,000 | 4.5-4.6ms | 9.5-10.2ms | 10.9-13.3ms | 0/200 | 93.61% |
-| 20,000 items / 20,000 distinct | 20,000 | 12.2-13.1ms | 26.3-27.4ms | 30.8-34.3ms | 49-69/200 | 97.44% |
-| 32,000 items / 32,000 distinct | 32,000 | 23.4ms | 44.7ms | 58.2ms | 169/200 | not measured |
+| 2,000 | 2,000 | 6.00ms | 18.00ms | 20.63ms | 2/150 | 71.97% |
+| 4,000 | 4,000 | 6.74ms | 11.05ms | 15.70ms | 0/150 | 85.77% |
+| 8,000 | 8,000 | 13.41ms | 25.96ms | 27.49ms | 16/150 | 92.88% |
+| 16,000 | 16,000 | 30.51ms | 40.91ms | 42.16ms | 150/150 | 96.44% |
+| 32,000 | 32,000 | 71.59ms | 121.60ms | 183.27ms | 150/150 | 98.22% |
 
-**The frame times in this table are stale, and the two columns are from
-different measurement epochs.** The timings predate the host-owned-clock change:
-`FrameStats` no longer carries a clock, so the harness times `draw_frame` **plus**
-a hard `device.poll(Wait)` rather than the CPU submit inside it. Only the timing
-columns are affected. A GPU wait inside the measured window can only make the
-figure larger, so these numbers are not pessimistic against the new definition,
-they measure something else. The direction is not the problem; the fact that they
-were taken under a different definition is.
+The wall is between 8,000 and 16,000 items with everything on screen, and the
+curve is now superlinear in a way the old table could never have shown: fill rate
+was never being paid. The 2,000-item row going 2/150 while the 4,000-item row
+goes 0/150 is the loaded-machine noise described below, not a real inversion, and
+it is the reason these numbers need re-taking on an idle machine before anyone
+quotes them.
 
-The **Degraded** column was measured after that change and is a count of
-item-frames, not a timing, so it is stable: two runs produced bit-identical
-percentages. It is reproduced under *Mip degradation is the real constraint*
-below.
+The 2,000-item case SQU-60 asks about, measured with the panning motion the
+default scenario uses rather than a still board, is 3.95ms mean / 5.87ms p99 /
+0/200 over budget at 45-61% CPU. That is the figure that carries the most weight
+and the least confidence.
 
 The whole board is one draw call with no batching logic, so draw-call overhead is
-not a factor at any item count.
+not a factor at any item count. What changed is everything behind the draw call:
+the GPU is now actually shading the pixels.
 
-**The wall is between 8,000 and 20,000 visible items** on the old, CPU-submit
-definition, and the 2,000-item case that SQU-60 asks about passed with roughly
-10x headroom. Neither position survives the definition change, so where the wall
-is now is **unresolved rather than moved**, and no number should be quoted until
-it is re-established.
+### Why no single number here is trustworthy yet
 
-Re-measuring was attempted and could not produce a defensible figure. Four runs
-of the identical 2,000-item scenario, same commit, same command, at 47-71% CPU
-load on a machine where a browser and two GPU apps share the integrated GPU:
+Re-measuring on an idle machine has not happened, and it is still the first thing
+to do. Four runs of the identical 2,000-item scenario, same commit, same
+command, at 47-71% CPU load on a machine where a browser and two GPU apps share
+the integrated GPU:
 
 | Run | Mean | p99 | Over budget |
 |---|---|---|---|
@@ -99,15 +144,17 @@ load on a machine where a browser and two GPU apps share the integrated GPU:
 | 3 | 6.92ms | 24.24ms | 6/200 |
 | 4 | 3.97ms | 7.22ms | 0/200 |
 
+Those four runs predate the renderer fix, so they are void for a second reason
+now. They are kept because they are still the best available evidence about
+run-to-run variance on a loaded machine, which has not been re-measured since.
 The p99 moves by 3x and the over-budget count by 6 frames across runs that differ
 only in what else the machine was doing. The documented 2x run-to-run variance is
-an underestimate under load. On the 8,000-item scenario two consecutive runs gave
-19/200 and 103/200 against a published 0/200.
+an underestimate under load. T3 Code is itself a consumer, so an agent session
+cannot produce a clean run while it is driving one.
 
-That is the honest state: the renderer is unchanged, the machine is not idle, and
-a mean quoted from any one of those runs would be a number nobody could
-reproduce. Degradation is unaffected, because it is a count of item-frames rather
-than a timing, and it returned 74.21% in all four.
+Degradation is a count of item-frames rather than a timing, and it is stable
+under load in a way timings are not: 74.21% came back identically across all four
+of those runs and again after the renderer fix.
 
 To close this, on an idle machine, capture rather than read off the screen:
 
@@ -288,29 +335,146 @@ intended stack.
 
 ## Still to do
 
-- **Re-measure the frame-time table on an idle machine.** The host now owns the
-  clock and the harness measures `draw_frame` plus a hard GPU wait, so the
-  published timings are from the older CPU-submit definition and the wall's
-  position is unresolved. Four attempts on a loaded machine ranged 3.97-6.92ms
-  mean and 7.20-24.24ms p99 on the same scenario, so this cannot be closed from
-  a busy desktop. Command and method are in *Frame times, and what they were
-  actually measuring*. First item because every other performance claim depends
-  on it.
+- **Re-measure the frame-time table on an idle machine.** The published table is
+  void: it was measured on a renderer that rasterised nothing, so every figure in
+  it is a lower bound. A first sample on a fixed renderer is in *Frame times,
+  first measurement on a renderer that draws*, and it was taken at 45-61% CPU
+  with an agent session driving it. Four attempts on a loaded machine ranged
+  3.97-6.92ms mean and 7.20-24.24ms p99 on the same scenario, so this cannot be
+  closed from a busy desktop. First item because every other performance claim
+  depends on it, and it is now also the only measurement of the real thing.
+- **Run the WebGL2 fallback and report a frame.** It compiles and the seam is
+  unchanged by construction, which is not the same as working. Detail in *In a
+  browser*.
+- **Confirm the browser's colours.** No sRGB surface format was available on the
+  machine that ran the spike, so the output may be gamma-crushed and nobody has
+  looked at a real image. Also in *In a browser*.
 - Restore a GPU-vs-CPU split if any decision depends on which side is the
-  bottleneck.
+  bottleneck. More pressing than it was: the wall is now superlinear, which is
+  what fill-rate pressure looks like, and that is a GPU-side cause.
 - `host-iced`: written, shares one wgpu device with the canvas, and has never
-  rendered. Assess it as a product shell, not as a frame-time benchmark.
+  rendered. Assess it as a product shell, not as a frame-time benchmark. Its
+  canvas now rasterises, so if it is still blank that is SQU-73 and not the
+  shader.
 - Zed's UI toolkit (`wgpu`, formerly `gpui`): establish whether it is dependable
   as an external dependency before anything else. The pinned wgpu version
   matters more than anything else about it.
 - Choose between them, and record the reasoning.
-- Compile the renderer to `wasm32` and measure it in a browser. Nothing has ever
-  done this and the whole plan rests on it working.
-- Design the canvas/host seam once, so both implementations share a definition.
 - Canvas text via `cosmic-text` + `glyphon`. Anything drawn in the renderer is
   shared between desktop and web, and the chrome is not, so this is the
   highest-leverage piece of the renderer rather than a later polish item.
 - Decide atlas capacity policy, or move off the atlas. The measured number now
-  exists: 74.21% of item-frames degrade at 2,048 and 0.00% at 8,192 for a
-  2,000-item board. The web has a smaller texture budget than the desktop, so
+  exists: 74.21% of item-frames degrade at 2,048 for a 2,000-item board, rising
+  to 98.22% at 32,000. The web has a smaller texture budget than the desktop, so
   there are two answers, not one.
+
+## In a browser
+
+SQU-83. The renderer compiles to `wasm32-unknown-unknown` and runs under
+`canvas-wasm`, which is the browser implementation of the seam. What that
+settled, and what it did not.
+
+### It works, and it is the same renderer
+
+`canvas-core`, `canvas-gpu` and `canvas-app` build for `wasm32-unknown-unknown`
+with nothing windowing-related in the graph. `pollster` is a
+`cfg(not(target_arch = "wasm32"))` dependency, because `headless_device` blocks on
+a future and a wasm module has no second thread to wake.
+
+The strongest evidence that this is the same renderer and not a second one
+dressed up as the first: the browser reported **74.21% mip degradation at a
+2,048 atlas for a 2,000-item board**, which is the native figure to two decimal
+places, and the same 2,000 peak-visible count. Those are computed on the CPU from
+atlas residency, so an identical value means an identical pipeline.
+
+### The seam
+
+Six things, all defined in `canvas-app` and `canvas-core` and none of them in a
+host: the device, the queue and the clock; a target view; pointer and wheel
+events; one `draw_frame` per frame; and the metrics. There is deliberately no
+trait for it, because a host's entire contribution is `get_current_texture`, a
+clock and an event forwarder, and a trait over three lines of behaviour is a
+name rather than an abstraction. What stops two hosts drifting is that the
+RESULT line is formatted in one place, `Metrics::result_line`, so the browser
+and the harness cannot spell a number differently.
+
+Keyboard is **not** in the seam yet, against the original list. Nothing in the
+canvas consumes a key, and an event type with no handler on the other end is a
+promise rather than an interface. It joins when something consumes it.
+
+The camera maths that pan and zoom need moved into `canvas-core` as
+`CameraControl`, beside `Viewport`, with four tests. Both hosts now drag the same
+way, and a drag pins the grabbed world point to the cursor rather than
+accumulating deltas, so a zoom mid-drag does not make the item creep out from
+under it.
+
+### Two numbers, one of them decided
+
+`.wasm` after `wasm-pack build --release` and `wasm-opt`: **252,395 bytes.** A
+local download for the desktop app, a network download for the hosted tier, so
+it is a number worth having before the ingest design gets written.
+
+Frame times, same scene and same definition as the harness. `draw_frame` plus the
+queue reporting all submitted work done is the browser's `device.poll(Wait)`:
+
+| Scenario | Peak visible | Mean | p99 | Over budget | Degraded |
+|---|---|---|---|---|---|
+| 2,000 / 2,000 distinct, 2560x1440 | 2,000 | 9.93ms | 16.50ms | 2/200 | 74.21% |
+
+One run, on a machine running the agent session that took it, so it is a sample
+and not a result. It is roughly 2.5x the native mean for the same scene, which
+is the shape of the answer the issue wanted: the boundary costs something real,
+and it is not catastrophic. The native side of that comparison needs an
+idle-machine run before the ratio means anything.
+
+One asymmetry is baked in and is not a bug: the native hosts render into an
+offscreen texture and blit it, because their toolkit owns the surface. The canvas
+context *is* the target here, so the browser figure excludes one fullscreen blit
+the desktop pays. Read it as a lower bound on the desktop host.
+
+### What is not settled
+
+**The WebGL2 fallback is compiled but unverified.** It is a feature flag rather
+than a second renderer, which is the right shape: `--features webgl` compiles
+`canvas-wasm` against wgpu's GL backend and the seam is untouched, because the
+backend is chosen in one `InstanceDescriptor`. That is a compile-time claim, not
+a measurement. Nobody has run it and reported a frame.
+
+**Chromium reports no adapter identity.** `adapter.get_info()` comes back with an
+empty name and zero vendor and device IDs on this machine, so a browser figure
+cannot name its GPU. `describe` prints what is available and says so explicitly
+when there is nothing, rather than emitting a bare slash. This is a real
+conditions problem and it is worse than the native path's, not better.
+
+**Colour has not been confirmed end to end.** The surface reports no sRGB format
+on this machine, so the target is `Bgra8Unorm` and the renderer's linear output is
+stored without an encode. The board rasterises and has real dynamic range
+(`distinct=8,287` colours, 28% of sampled pixels off the clear colour), but
+whether it is *correct* is unverified, and the honest next step is a
+max-pooled luminance readback rather than another guess. Native hosts pass
+`Rgba8UnormSrgb` explicitly and are unaffected.
+
+**A headless browser cannot confirm presentation.** The page screenshot came back
+blank for the canvas and `createImageBitmap` on it read an empty layer, while a
+2D-canvas control read back correctly through the same code. A frame that was
+submitted and never painted, and a frame that was painted and never composited,
+look identical from outside and mean opposite things. GPU readback distinguishes
+the renderer; only a headed browser can settle the compositor.
+
+### The toolchain is not what this document claimed
+
+`AGENTS.md` said `wasm32-unknown-unknown` was installed with no
+`rustup target add` needed. It was listed by `rustup target list --installed` and
+the target's lib directory was **empty**, so every cross-target build failed with
+`can't find crate for core` on a target nobody had asked about. `rust-toolchain.toml`
+now declares the target, which makes `rustup` install it on the clone that needs
+it.
+
+Separately, this machine has two Rust installations and `C:\Program Files\Rust
+stable MSVC 1.98\bin` precedes the rustup shim on `PATH`. Cargo resolves `rustc`
+from `PATH`, so cross-target builds silently used the 1.98 toolchain, whose
+sysroot has no wasm32 std, and native builds used 1.98 while the repo documents a
+1.92 floor. Prepending the rustup toolchain's `bin` fixes it. A fresh clone on a
+machine with only rustup is unaffected, which is why this is a note rather than a
+committed workaround.
+
