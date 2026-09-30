@@ -233,35 +233,55 @@ including a hard GPU wait, which is the sum, not a split. Restoring the split
 needs a timestamp-query or buffer-readback path, and nothing currently depends on
 it.
 
-## Windowed presentation does not work on the dev machine
+## Windowed presentation fails on one machine and works on another
 
-Every windowed host built here opens a real window and never draws a pixel. This
-is not a bug in the canvas code, and it is not specific to iced.
+**On the dev laptop every windowed host opens a real window and never draws a
+pixel. On a second Windows machine the same binaries draw correctly.** That is
+SQU-73, and it is resolved as a machine fault rather than a wgpu one. Nothing in
+this document should be read as a claim that windowed wgpu is broken.
 
-`crates/probe-surface` is the control: raw winit 0.30 and raw wgpu 27, no UI
-framework, clearing every frame to solid magenta. It reports
+The two bugs that hid behind it are both fixed. The canvas vertex shader was
+clipping every quad, which is the *Every frame time before this commit* section
+above. And `probe-surface` itself was panicking on any monitor wider than 2048,
+because it requested `downlevel_webgl2_defaults()` and then configured the surface
+at the raw window size, so the control could not answer the question it existed to
+answer on a wide display. It now resolves its texture limits against the adapter,
+the same line the harness uses.
+
+What is left is the dev laptop. The original observations stand: the probe
+presents 300+ frames, `present()` returns `Ok` on every one, wgpu logs no error,
+and the client area stays white while other GPU-composited windows render normally
+in the same desktop capture.
+
+One loose end was never closed and is still open: `WGPU_BACKEND=dx12` is ignored
+by wgpu 27 there, which still selected Vulkan, so DX12 is genuinely untested on
+that box and needs the backend hard-coded rather than set by environment. Since
+Vulkan is the backend that fails and D3D12 demonstrably works in the browser on
+both machines, that is the cheapest test left and it would say whether the fault
+is wgpu on that machine or Vulkan on that machine.
+
+What the dev laptop actually reports, for anyone who has to reproduce it:
 
 ```
 adapter: Intel(R) Iris(R) Xe Graphics / Vulkan
-presented frame 1 / 2 / 3 / 60 / 120 / 180
+presented frame 1 / 2 / 3 / 60 / 120 / 180 / 240 / 300
 ```
 
 `present()` returns `Ok` on every frame, the surface configures cleanly,
-`VK_KHR_swapchain` is present, and wgpu logs no error - and the window client
-area stays white. Confirmed while the window was explicitly foregrounded, and
-confirmed again in a full-desktop capture where other GPU-composited windows
-render normally, so it is not a screenshot artefact. Headless wgpu renders
-correctly on the same machine, so the GPU and the wgpu build are fine.
+`VK_KHR_swapchain` is present, and wgpu logs no error, and the client area stays
+white. Confirmed while the window was explicitly foregrounded, and again in a
+full-desktop capture where other GPU-composited windows render normally, so it is
+not a screenshot artefact. Headless wgpu renders correctly on the same machine, so
+the GPU and the wgpu build are fine.
 
-Three hosts were tried and all blank: iced 0.14, iced 0.13.1, and the raw probe.
-Process inspection during the iced hang showed 27 threads all in wait, one in
-`LpcReply`, which is suggestive of a kernel or driver call but is not proof.
+Three hosts were tried there and all blank: iced 0.14, iced 0.13.1, and the raw
+probe. Process inspection during the iced hang showed 27 threads all in wait, one
+in `LpcReply`, which is suggestive of a kernel or driver call and is not proof.
 
-The consequence for this spike: **no wgpu host can be visually verified or timed
-on this machine.** Headless numbers are trustworthy; anything requiring a window
-is blocked. Tracked as SQU-73. One loose end there: `WGPU_BACKEND=dx12` is
-ignored by wgpu 27 here, which still selected Vulkan, so DX12 is genuinely
-untested and needs the backend hard-coded rather than set by environment.
+The consequence is narrower than it was recorded as. **On the dev laptop, no wgpu
+host can be visually verified or timed.** On the second machine they can, which is
+what unblocks the idle-machine re-measurement and the toolkit comparison. Anything
+requiring a window should say which machine it happened on.
 
 ## Findings that changed the design
 
@@ -346,16 +366,15 @@ intended stack.
 - **Run the WebGL2 fallback and report a frame.** It compiles and the seam is
   unchanged by construction, which is not the same as working. Detail in *In a
   browser*.
-- **Confirm the browser's colours.** No sRGB surface format was available on the
-  machine that ran the spike, so the output may be gamma-crushed and nobody has
-  looked at a real image. Also in *In a browser*.
 - Restore a GPU-vs-CPU split if any decision depends on which side is the
   bottleneck. More pressing than it was: the wall is now superlinear, which is
   what fill-rate pressure looks like, and that is a GPU-side cause.
-- `host-iced`: written, shares one wgpu device with the canvas, and has never
-  rendered. Assess it as a product shell, not as a frame-time benchmark. Its
-  canvas now rasterises, so if it is still blank that is SQU-73 and not the
-  shader.
+- **`host-iced` has never rendered anywhere, and both reasons for that are now
+  different.** The canvas shader was clipping every quad, which is fixed, and the
+  dev laptop cannot present, which is a machine fault the second machine does not
+  have. Running it on the second machine is a one-command test nobody has done, and
+  it is the last unknown on the native side. Assess it as a product shell, not as a
+  frame-time benchmark.
 - Zed's UI toolkit (`wgpu`, formerly `gpui`): establish whether it is dependable
   as an external dependency before anything else. The pinned wgpu version
   matters more than anything else about it.
@@ -408,24 +427,45 @@ way, and a drag pins the grabbed world point to the cursor rather than
 accumulating deltas, so a zoom mid-drag does not make the item creep out from
 under it.
 
-### Two numbers, one of them decided
+### Three things, two of them decided
 
 `.wasm` after `wasm-pack build --release` and `wasm-opt`: **252,395 bytes.** A
 local download for the desktop app, a network download for the hosted tier, so
 it is a number worth having before the ingest design gets written.
 
+**Colours are settled.** This was open because the surface on the dev laptop reports no sRGB format, so the target there is `Bgra8Unorm` and the renderer's linear output is stored without an encode, which ought to crush the image about a gamma too dark. The second machine renders the generated test textures in visibly correct colour, blobs and hues intact, so whatever that format negotiation does it is not visibly wrong. The readback had been reporting a dark `#040303` as the commonest non-background colour, which is the base of each generated texture showing around its blobs at a blurred mip level, not a crushed image. `peak_luma=255` and a histogram spread across all eight buckets were saying so at the time. Native hosts pass `Rgba8UnormSrgb` explicitly and were never affected.
+
 Frame times, same scene and same definition as the harness. `draw_frame` plus the
 queue reporting all submitted work done is the browser's `device.poll(Wait)`:
 
-| Scenario | Peak visible | Mean | p99 | Over budget | Degraded |
-|---|---|---|---|---|---|
-| 2,000 / 2,000 distinct, 2560x1440 | 2,000 | 9.93ms | 16.50ms | 2/200 | 74.21% |
+| Run | Machine | Mean | p50 | p99 | Max | Over budget | Degraded |
+|---|---|---|---|---|---|---|---|
+| 1 | dev laptop, preview browser | 9.93ms | 10.00ms | 16.50ms | 16.80ms | 2/200 | 74.21% |
+| 2 | second machine, Chrome | 9.97ms | 8.90ms | 22.60ms | 29.50ms | 19/200 | 74.16% |
 
-One run, on a machine running the agent session that took it, so it is a sample
-and not a result. It is roughly 2.5x the native mean for the same scene, which
-is the shape of the answer the issue wanted: the boundary costs something real,
-and it is not catastrophic. The native side of that comparison needs an
-idle-machine run before the ratio means anything.
+The mean is stable across two machines and two browsers, 9.93 and 9.97, which is
+the one encouraging thing here. **The tail is not:** p99 of 22.60ms with 19 of 200
+frames over budget, against 16.50ms and 2/200 on the first run. A single run's
+tail is not a tail, so treat 19/200 as the figure to beat rather than 2/200.
+
+Degradation agrees to 0.05 percentage points across the two machines, and so does
+the readback's luma histogram. Both come from the CPU side of the pipeline, so that
+is evidence the same scene and the same atlas are being exercised in both places on
+hardware that is not the same.
+
+**The ratio to the native mean is not yet a measurement.** Run 1's 9.93ms divided
+by the native 3.95ms gives 2.52x, which is a tidy enough number to be tempting. It
+is also a number from one machine divided by a number from another, so it means
+nothing until both halves come off the same box. The second machine presents
+natively *and* runs the browser, so it is the only place that comparison can be
+made, and it has not been made yet.
+
+The interactive page's live line is **not** a measurement of this. It read about
+17.6ms on the machine where this table says 9.97ms, because it is paced by the
+display refresh and was being measured while a person dragged the camera around.
+The live number and the RESULT line are the same metric over different traffic, and
+the difference between them is a reminder that how a frame is produced matters as
+much as how long it takes.
 
 One asymmetry is baked in and is not a bug: the native hosts render into an
 offscreen texture and blit it, because their toolkit owns the surface. The canvas
