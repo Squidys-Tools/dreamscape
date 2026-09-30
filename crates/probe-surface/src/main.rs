@@ -79,7 +79,17 @@ impl ApplicationHandler for Probe {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("probe-device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+            // `using_resolution` matters here, and the omission of it is why this
+            // probe stopped working rather than starting to fail differently.
+            // `downlevel_webgl2_defaults()` caps `max_texture_dimension_2d` at
+            // 2048, and the surface is then configured at the raw window size, so
+            // a monitor wider than 2048 pixels made `Surface::configure` fail
+            // validation and the process panic before it drew a single frame.
+            // The harness and the browser host resolve the resolution-dependent
+            // limits against the adapter, which is what lets them render at
+            // 2560x1440. Same line, same reason.
+            required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                .using_resolution(adapter.limits()),
             memory_hints: wgpu::MemoryHints::default(),
             trace: wgpu::Trace::Off,
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
