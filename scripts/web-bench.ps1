@@ -70,6 +70,29 @@ if ($ResultLog) {
   }
 }
 
+# The two external tools, resolved rather than assumed.
+#
+# `wasm-pack` is a cargo install, so it lands in the per-user cargo bin, and `bun`
+# is a per-user install too. Both directories are on PATH in some shells and not
+# in others, and a bare "the term is not recognized" tells nobody what to do. The
+# browser tier is supposed to work on a fresh clone on another Windows machine,
+# and a script that dies on a PATH quirk is that machine's first impression.
+function Resolve-External {
+  param([string]$Name, [string]$Hint)
+
+  $onPath = Get-Command $Name -ErrorAction SilentlyContinue
+  if ($onPath) { return $onPath.Source }
+
+  foreach ($dir in @("$env:USERPROFILE\.cargo\bin", "$env:USERPROFILE\.bun\bin")) {
+    $candidate = Join-Path $dir "$Name.exe"
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+  }
+  throw "$Name was not found. $Hint"
+}
+
+$wasmPack = Resolve-External 'wasm-pack' 'Install it with: cargo install wasm-pack'
+$bun = Resolve-External 'bun' 'Install it from https://bun.sh, or add %USERPROFILE%\.bun\bin to PATH.'
+
 # The WebGL2 fallback needs its backend compiled in, which drags GLES and wgpu-hal
 # into the bundle. Off by default, so this is the only thing that turns it on.
 # Built as an array because an empty string variable still becomes an argument,
@@ -79,7 +102,7 @@ if ($Backend -eq 'webgl') { $wasmArgs += @('--features', 'webgl') }
 
 Write-Host ''
 Write-Host 'building the renderer for wasm32-unknown-unknown...' -ForegroundColor Cyan
-& wasm-pack @wasmArgs
+& $wasmPack @wasmArgs
 if ($LASTEXITCODE -ne 0) { throw "wasm-pack build failed" }
 
 # Reported because it is a result, not a detail: the download size is different
@@ -94,7 +117,7 @@ $serverLog = Join-Path $env:TEMP "dreamscape-web-bench-$PID.log"
 # Same reason as the wasm arguments: a blank argument is worse than no argument.
 $serveArgs = @((Join-Path $crate 'web\serve.js'), '0')
 if ($ResultLog) { $serveArgs += (Join-Path (Get-Location) $ResultLog) }
-$server = Start-Process -PassThru -NoNewWindow -FilePath 'bun' `
+$server = Start-Process -PassThru -NoNewWindow -FilePath $bun `
   -ArgumentList $serveArgs `
   -RedirectStandardOutput $serverLog -RedirectStandardError "$serverLog.err"
 
