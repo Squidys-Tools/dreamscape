@@ -88,8 +88,8 @@ impl ApplicationHandler for Probe {
             // The harness and the browser host resolve the resolution-dependent
             // limits against the adapter, which is what lets them render at
             // 2560x1440. Same line, same reason.
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                .using_resolution(adapter.limits()),
+            required_limits:
+                wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
             memory_hints: wgpu::MemoryHints::default(),
             trace: wgpu::Trace::Off,
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
