@@ -53,7 +53,12 @@
     },
     {
       "name": "Browser canvas (measured)",
-      "command": ".\\scripts\\web-bench.ps1 -Scenario quick -ResultLog bench-web.txt",
+      "command": ".\\scripts\\web-bench.ps1 -Scenario quick -Measure -ResultLog bench-web.txt",
+      "icon": "play"
+    },
+    {
+      "name": "Browser canvas (WebGL2 fallback, measured)",
+      "command": ".\\scripts\\web-bench.ps1 -Backend webgl -Scenario quick -Measure -ResultLog bench-web-gl.txt",
       "icon": "play"
     },
     {

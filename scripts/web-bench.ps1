@@ -38,6 +38,10 @@
 .PARAMETER NoOpen
   Start the server without launching a browser. For driving it yourself, or on a
   headless machine.
+
+.PARAMETER Measure
+  Open the first measure URL instead of the interactive board. The interactive
+  page does not post a result, so a run meant to capture a number needs this.
 #>
 param(
   [ValidateSet('quick', 'bench', 'scale')]
@@ -54,7 +58,9 @@ param(
 
   [int]$Height = 1440,
 
-  [switch]$NoOpen
+  [switch]$NoOpen,
+
+  [switch]$Measure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -158,19 +164,27 @@ try {
   foreach ($u in $urls) { Write-Host "  measure      $u" }
   Write-Host ''
 
-  # The interactive page, not a measure URL. Someone running this wants a board
-  # they can drag around, and a measure URL runs a fixed number of frames and
-  # prints a line, which is a different thing to want. The measure URLs are
-  # printed above for when that is what you came for.
+  # The interactive page by default, since someone running this usually wants a
+  # board they can drag around. `-Measure` opens a scenario instead, and that is
+  # the only path that produces a captured result: the interactive page has no
+  # frame count and posts nothing, so a run with `-ResultLog` and no `-Measure`
+  # writes a load bracket and no number, which looks like a failure.
   if (-not $NoOpen) {
-    Start-Process $interactive
-    if ($urls.Count -gt 1) {
-      Write-Host 'opened the interactive board. the measure URLs above are one navigation away.' -ForegroundColor DarkGray
+    if ($Measure) {
+      Start-Process $urls[0]
+      if ($urls.Count -gt 1) {
+        Write-Host 'opened the first measure URL; the rest are one navigation away.' -ForegroundColor DarkGray
+      }
+    } else {
+      Start-Process $interactive
     }
   }
 
   if ($ResultLog) {
     Write-Host "posting results to $ResultLog once each measure URL has run." -ForegroundColor DarkGray
+    if (-not $Measure) {
+      Write-Host 'note: the interactive page posts nothing. re-run with -Measure to capture a number.' -ForegroundColor DarkGray
+    }
   } else {
     Write-Host 'running. ctrl-c to stop.' -ForegroundColor DarkGray
   }
