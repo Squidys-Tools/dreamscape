@@ -149,10 +149,17 @@ try {
 
   # Every run needs the board full, so the pan is zeroed in `scale` exactly as
   # bench.ps1 zeroes it, and the two runners are describing the same scene.
-  $urls = foreach ($n in $rows) {
-    $motion = if ($Scenario -eq 'scale') { 'pan=0&zoom=0.96&frames=150' } else { 'pan=18&zoom=0.7&frames=200' }
-    "$url/web/index.html?$common&items=$n&textures=$n&$motion"
-  }
+  # `@()` matters. A `foreach` that yields one item assigns a bare string, and
+  # `$urls[0]` on a string is its first character, not the first element. So
+  # `-Scenario quick`, the one-row case, tried to launch a program called "h".
+  # The three-row `bench` case happened to work, which is what made this look
+  # like a browser problem rather than an array problem.
+  $urls = @(
+    foreach ($n in $rows) {
+      $motion = if ($Scenario -eq 'scale') { 'pan=0&zoom=0.96&frames=150' } else { 'pan=18&zoom=0.7&frames=200' }
+      "$url/web/index.html?$common&items=$n&textures=$n&$motion"
+    }
+  )
   $interactive = "$url/web/index.html?atlas=$Atlas&backend=$Backend&width=$Width&height=$Height"
 
   if ($ResultLog) {
