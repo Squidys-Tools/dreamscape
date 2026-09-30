@@ -19,7 +19,7 @@ Settled so far, and load-bearing for everything after it:
 
 ## Status
 
-The renderer works and is measured headlessly and in a browser. The windowed path does not work on the development machine at all.
+The renderer works and is measured headlessly and in a browser. The windowed path does not work on one development machine, and does on another.
 
 **Working:** culling, LOD, the atlas, eviction, search, 14 unit tests over the correctness-critical logic, a reproducible benchmark, and the same renderer compiled to `wasm32` and running in a browser.
 
