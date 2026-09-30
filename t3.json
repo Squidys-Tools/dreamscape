@@ -48,7 +48,7 @@
     },
     {
       "name": "Browser canvas (interactive)",
-      "command": ".\\scripts\\web-bench.ps1 -NoOpen",
+      "command": ".\\scripts\\web-bench.ps1 -Scenario quick",
       "icon": "play"
     },
     {

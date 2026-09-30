@@ -36,7 +36,8 @@
   Drawing-buffer height in device pixels. Defaults to 1440.
 
 .PARAMETER NoOpen
-  Start the server without opening a browser.
+  Start the server without launching a browser. For driving it yourself, or on a
+  headless machine.
 #>
 param(
   [ValidateSet('quick', 'bench', 'scale')]
@@ -157,11 +158,14 @@ try {
   foreach ($u in $urls) { Write-Host "  measure      $u" }
   Write-Host ''
 
+  # The interactive page, not a measure URL. Someone running this wants a board
+  # they can drag around, and a measure URL runs a fixed number of frames and
+  # prints a line, which is a different thing to want. The measure URLs are
+  # printed above for when that is what you came for.
   if (-not $NoOpen) {
-    Start-Process $urls[0]
+    Start-Process $interactive
     if ($urls.Count -gt 1) {
-      Write-Host "opened the first scenario; the rest are one navigation away." -ForegroundColor DarkGray
-      Write-Host 'run every row by opening each measure URL above, or pick one and re-run with -Scenario quick.' -ForegroundColor DarkGray
+      Write-Host 'opened the interactive board. the measure URLs above are one navigation away.' -ForegroundColor DarkGray
     }
   }
 
