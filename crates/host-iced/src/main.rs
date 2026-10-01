@@ -21,17 +21,22 @@
 //! sixty times a second. Frame times for the canvas come from
 //! `scripts/bench.ps1`; a panel duplicating them was always going to disagree.
 //!
-//! Pointer and wheel are not wired up here yet. The browser host already proves
-//! the seam carries them, and doing it again in iced means a second event path to
-//! keep in step. It is the obvious next step for this host and it is not a small
-//! one.
+//! Pointer and wheel come from one `listen_with` subscription that forwards into
+//! the same `AppState::pointer` and `AppState::wheel` the browser host calls, so
+//! there is one seam and two callers rather than two input paths.
+//!
+//! iced reports positions in logical pixels and the canvas draws in device
+//! pixels, so `update` scales through `Shared::scale_factor`, which `prepare`
+//! takes from iced. Nothing here assumes the two match.
 
 mod canvas_widget;
 
 use std::sync::{Arc, Mutex};
 
 use canvas_app::{AppState, Config};
-use iced::{Element, Fill, Task, Theme};
+use canvas_core::{PointerEvent, PointerPhase, Vec2, WheelEvent};
+use iced::mouse::{self, Button, ScrollDelta};
+use iced::{Element, Event, Fill, Point, Subscription, Task, Theme};
 
 use canvas_widget::{CanvasProgram, Shared};
 
@@ -40,12 +45,49 @@ const ITEMS: u32 = 8_000;
 
 struct App {
     shared: Arc<Mutex<Shared>>,
+    /// Last cursor position in logical pixels.
+    ///
+    /// iced's wheel event carries a delta but no position, and the canvas zooms
+    /// towards a point, so without this the wheel has nothing to zoom towards.
+    cursor: Option<Point>,
 }
 
-/// There is no message, because there is no chrome to send one. iced still wants
-/// a type, and an uninhabited one is the honest answer.
 #[derive(Debug, Clone)]
-enum Msg {}
+enum Msg {
+    /// The cursor moved, in logical pixels.
+    ///
+    /// Recorded rather than acted on, because iced's button and wheel events
+    /// carry no position of their own and the canvas needs a point to pan or
+    /// zoom towards.
+    Cursor(Point),
+    /// The left button went down or came up.
+    Pressed(bool),
+    /// A wheel delta in logical pixels, applied at `App::cursor`.
+    Wheel(Vec2),
+}
+
+/// Every pointer and wheel event on the window, in one place.
+///
+/// A free function because iced takes `&App`, not `&mut App`.
+///
+/// The status argument is deliberately ignored, so this sees events the canvas
+/// widget has already captured as well as the ones it has not. The widget is
+/// `opaque`, so filtering to unconsumed events would deliver nothing at all. The
+/// cost is that the widget stops seeing them too, which only costs it a cursor
+/// shape.
+fn subscription(_app: &App) -> Subscription<Msg> {
+    iced::event::listen_with(|event, _status, _id| match event {
+        Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Msg::Cursor(position)),
+        Event::Mouse(mouse::Event::ButtonPressed(Button::Left)) => Some(Msg::Pressed(true)),
+        Event::Mouse(mouse::Event::ButtonReleased(Button::Left)) => Some(Msg::Pressed(false)),
+        // Line-based deltas have no pixel size to scale by, and every desktop
+        // browser sends pixels, so lines are dropped rather than guessed at.
+        Event::Mouse(mouse::Event::WheelScrolled {
+            delta: ScrollDelta::Pixels { x, y },
+        }) => Some(Msg::Wheel(Vec2::new(x, y))),
+        _ => None,
+    })
+}
 
 /// iced 0.14 dropped the `Application` trait: `iced::application` takes plain
 /// functions, so these are inherent methods.
@@ -58,11 +100,86 @@ impl App {
         });
         Self {
             shared: Arc::new(Mutex::new(Shared::new(app))),
+            cursor: None,
         }
     }
 
     fn update(&mut self, message: Msg) -> Task<Msg> {
-        match message {}
+        match message {
+            Msg::Cursor(at) => {
+                self.cursor = Some(at);
+                // A move while the button is down is a drag; a move with nothing
+                // down is just the cursor arriving, and forwarding it would pan
+                // the board every time the mouse crossed the window.
+                if self.is_dragging() {
+                    self.forward(|app, size, scale| {
+                        app.pointer(
+                            PointerEvent {
+                                pos: point_device(at, scale),
+                                phase: PointerPhase::Move,
+                            },
+                            size,
+                        )
+                    });
+                }
+            }
+            Msg::Pressed(down) => {
+                let phase = if down {
+                    PointerPhase::Down
+                } else {
+                    PointerPhase::Up
+                };
+                let at = self.cursor.unwrap_or(Point::ORIGIN);
+                self.forward(|app, size, scale| {
+                    app.pointer(
+                        PointerEvent {
+                            pos: point_device(at, scale),
+                            phase,
+                        },
+                        size,
+                    )
+                });
+            }
+            Msg::Wheel(delta) => {
+                let at = self.cursor.unwrap_or(Point::ORIGIN);
+                let scale = scale_of(self.shared.as_ref());
+                self.forward(|app, size, _| {
+                    app.wheel(
+                        WheelEvent {
+                            pos: point_device(at, scale),
+                            delta: delta_device(delta, scale),
+                        },
+                        size,
+                    )
+                });
+            }
+        }
+        Task::none()
+    }
+
+    fn is_dragging(&self) -> bool {
+        self.shared
+            .lock()
+            .expect("canvas state poisoned")
+            .app
+            .dragging()
+    }
+
+    /// Locks the shared state once, reads the scale factor and canvas size out of
+    /// it, and lets the caller hand the event to the app in device pixels.
+    fn forward(&self, f: impl FnOnce(&mut AppState, Vec2, f32)) {
+        let mut guard = self.shared.lock().expect("canvas state poisoned");
+        let Shared {
+            app,
+            scale_factor,
+            last_size,
+            ..
+        } = &mut *guard;
+        f(
+            app,
+            Vec2::new(last_size.0 as f32, last_size.1 as f32),
+            *scale_factor,
+        );
     }
 
     fn view(&self) -> Element<'_, Msg, Theme, iced_wgpu::Renderer> {
@@ -76,12 +193,29 @@ impl App {
     }
 }
 
+/// A point in logical pixels to device pixels.
+fn point_device(at: Point, scale: f32) -> Vec2 {
+    Vec2::new(at.x * scale, at.y * scale)
+}
+
+/// A delta in logical pixels to device pixels.
+fn delta_device(d: Vec2, scale: f32) -> Vec2 {
+    Vec2::new(d.x * scale, d.y * scale)
+}
+
+/// Reads the scale factor out of the shared state. Used where the caller cannot
+/// already hold the guard.
+fn scale_of(shared: &Mutex<Shared>) -> f32 {
+    shared.lock().expect("canvas state poisoned").scale_factor
+}
+
 fn main() -> iced::Result {
     // iced_wgpu reports surface and swapchain problems through `log`. Without a
     // logger installed every one of those diagnostics is silently dropped, which
     // makes a window that never draws look like a silent success.
     env_logger::init();
     iced::application::<App, Msg, Theme, iced_wgpu::Renderer>(App::new, App::update, App::view)
+        .subscription(subscription)
         .title("dreamscape spike - host-iced")
         .antialiasing(true)
         .run()

@@ -26,6 +26,12 @@ pub struct Shared {
     pub last_size: (u32, u32),
     pub last_uploads: u32,
     pub last_evictions: u64,
+    /// Logical-to-device ratio, taken from iced rather than assumed to be 1.
+    ///
+    /// Pointer events arrive in logical pixels and the canvas draws in device
+    /// pixels, so the input path needs this and there is exactly one place that
+    /// knows it.
+    pub scale_factor: f32,
     /// Frames since the last stdout line, so reporting does not cost a frame.
     reported: u64,
 }
@@ -43,6 +49,7 @@ impl Shared {
             last_size: (1, 1),
             last_uploads: 0,
             last_evictions: 0,
+            scale_factor: 1.0,
             reported: 0,
         }
     }
@@ -231,6 +238,7 @@ impl Primitive for CanvasPrimitive {
         let w = ((bounds.width * viewport.scale_factor()).round() as u32).max(1);
         let h = ((bounds.height * viewport.scale_factor()).round() as u32).max(1);
         sh.last_size = (w, h);
+        sh.scale_factor = viewport.scale_factor();
 
         let needs_target = match &pipeline.target {
             Some(t) => t.width() != w || t.height() != h,

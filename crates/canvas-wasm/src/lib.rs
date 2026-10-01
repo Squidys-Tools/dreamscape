@@ -160,6 +160,15 @@ impl CanvasHost {
             backends,
             ..Default::default()
         });
+
+        // The surface is offered to adapter selection on purpose, and the reason is
+        // recorded here because it looks removable and is not.
+        //
+        // wgpu-hal enumerates GL adapters *from the canvas's own WebGL2 context*
+        // (wgpu-hal 27 `gles/web.rs`, `enumerate_adapters`): with no surface hint
+        // it returns an empty list, so the request fails with "gl found no
+        // adapters" no matter how capable the browser is. Dropping the hint trades
+        // a correct-but-hanging path for a fast misleading one.
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(|e| err("create_surface", e))?;

@@ -363,9 +363,6 @@ intended stack.
   3.97-6.92ms mean and 7.20-24.24ms p99 on the same scenario, so this cannot be
   closed from a busy desktop. First item because every other performance claim
   depends on it, and it is now also the only measurement of the real thing.
-- **Run the WebGL2 fallback and report a frame.** It compiles and the seam is
-  unchanged by construction, which is not the same as working. Detail in *In a
-  browser*.
 - Restore a GPU-vs-CPU split if any decision depends on which side is the
   bottleneck. More pressing than it was: the wall is now superlinear, which is
   what fill-rate pressure looks like, and that is a GPU-side cause.
@@ -474,11 +471,31 @@ the desktop pays. Read it as a lower bound on the desktop host.
 
 ### What is not settled
 
-**The WebGL2 fallback is compiled but unverified.** It is a feature flag rather
-than a second renderer, which is the right shape: `--features webgl` compiles
-`canvas-wasm` against wgpu's GL backend and the seam is untouched, because the
-backend is chosen in one `InstanceDescriptor`. That is a compile-time claim, not
-a measurement. Nobody has run it and reported a frame.
+**The WebGL2 fallback does not start, and the reason is in wgpu rather than in
+this repo.** It is a feature flag rather than a second renderer, which is the right
+shape: `--features webgl` compiles `canvas-wasm` against wgpu's GL backend and the
+seam is untouched, because the backend is chosen in one `InstanceDescriptor`. That
+much is a compile-time fact. Running it is the other half, and it is a negative
+result, so here it is in full.
+
+`.\scripts\web-bench.ps1 -Backend webgl -Scenario quick -Measure` builds a
+3,204,273-byte module, opens the page, and the page never gets a device.
+`request_adapter` never returns.
+
+The mechanism is in wgpu-hal 27 `gles/web.rs`. On the web, GL adapters are
+enumerated from the canvas's own WebGL2 context, so the surface has to be passed
+to adapter selection. With the surface, the await hangs. Without it,
+`enumerate_adapters` returns an empty `Vec` and the request fails immediately with
+`gl found no adapters`. Both were run; the second is a faster failure and a worse
+one, because it reports a lack of adapters on a machine whose WebGL2 context was
+created successfully a moment earlier. The surface is offered in the committed
+code, since that is the only configuration that could ever work.
+
+So: **the hosted tier requires WebGPU.** There is no working WebGL2 fallback here,
+which is a browser-support constraint and belongs in the browser-support decision
+rather than here. Anyone revisiting this should start at
+`Adapter::expose` in `gles/adapter.rs`, which is where the hang lands, and should
+re-check it against a newer wgpu before assuming the answer is stable.
 
 **Chromium reports no adapter identity.** `adapter.get_info()` comes back with an
 empty name and zero vendor and device IDs on this machine, so a browser figure

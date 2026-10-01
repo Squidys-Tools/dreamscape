@@ -90,20 +90,44 @@
         readout.innerHTML = html;
       };
 
+      // Rejects with `what` if `promise` has not settled in `ms`.
+      //
+      // Requesting an adapter is the step that can quietly never resolve, and a
+      // page that just waits looks identical to a slow load. A marker on the
+      // screen plus this bound means a failure names the step it happened on.
+      const withTimeout = (promise, ms, what) =>
+        Promise.race([
+          promise,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(what)), ms),
+          ),
+        ]);
+
       try {
+        show("loading the module…");
         await init();
         const [w, h] = sizeCanvas();
-        const host = await CanvasHost.create(
-          board,
-          scene.items,
-          scene.textures,
-          scene.atlas,
-          scene.extent,
-          scene.pan,
-          scene.zoom,
-          bench,
-          backend,
+
+        show(`creating a ${backend} device on ${w}x${h}…`);
+        const host = await withTimeout(
+          CanvasHost.create(
+            board,
+            scene.items,
+            scene.textures,
+            scene.atlas,
+            scene.extent,
+            scene.pan,
+            scene.zoom,
+            bench,
+            backend,
+          ),
+          // A backend that cannot start should say so. Without this the page sits
+          // on whatever the last marker was, and a panic and a hang are the same
+          // picture, which is how a WebGL2 failure looked like a slow load.
+          30_000,
+          `${backend} did not produce a device within 30s`,
         );
+        show("device created; reading the first frame back…");
         host.resize(w, h);
 
         const describe = (result, verify) => ({
@@ -122,8 +146,7 @@
         const verify = await host.verify_pixels();
 
         if (bench) {
-          show(`measuring ${frames} frames after ${warmup} warmup…`);
-          const result = await host.run(warmup, frames);
+          show(`measuring ${frames} frames after ${warmup} warmup…`);          const result = await host.run(warmup, frames);
           // Read the render target back rather than trusting the canvas: a
           // headless browser will happily screenshot a WebGPU canvas it never
           // composited, and that is indistinguishable from a renderer that drew
@@ -224,12 +247,18 @@
           requestAnimationFrame(loop);
         }
       } catch (e) {
-        show(String(e), "err");
+        // Both places. The readout is what a person sees and the console is what
+        // a person needs when the failure is a Rust panic, because the message
+        // wasm prints before it traps is only ever in the console.
+        const detail =
+          e instanceof Error ? `${e.name}: ${e.message}\n${e.stack ?? ""}` : String(e);
+        console.error("canvas host failed:", e);
+        show(`<b>failed</b>\n${detail.split("\n").slice(0, 6).join("\n")}`, "err");
         // Still report, so a failed run leaves a trace instead of a blank page.
         await fetch("/result", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ error: String(e), backend, scene }),
+          body: JSON.stringify({ error: detail.split("\n")[0], backend, scene }),
         }).catch(() => {});
       }
     </script>
