@@ -325,12 +325,21 @@ impl Primitive for CanvasPrimitive {
         // reported `canvas 1x1` and `frames 0` while a full board was plainly on
         // screen, and nothing on screen could say which of the two was lying.
         sh.reported += 1;
-        if sh.reported.is_multiple_of(Shared::REPORT_EVERY) {
+        // The first frame is reported on its own, and immediately.
+        //
+        // Two reasons, both learned the hard way. A host that never draws is
+        // otherwise indistinguishable from one that draws slowly, which is how a
+        // panel once reported `frames 0` next to a plainly visible board. And iced
+        // only redraws on demand, so an untouched window never reaches a
+        // 120-frame threshold and prints nothing at all, leaving a working host
+        // looking identical to a dead one.
+        if sh.reported == 1 || sh.reported.is_multiple_of(Shared::REPORT_EVERY) {
             let (mean, _p50, p99, max, over) = sh.metrics.percentiles(BUDGET_MS);
             eprintln!(
                 "host-iced  {w}x{h}  frames {}  mean {mean:.2}ms  p99 {p99:.2}ms  \
                  max {max:.2}ms  over {over}/{}  peak visible {}  drawn {}  \
-                 degraded {}  placeholders {}  uploads {}  evictions {}",
+                 degraded {}  placeholders {}  uploads {}  evictions {}  \
+                 camera {:.4} at {:.0},{:.0}",
                 sh.metrics.len(),
                 sh.metrics.len(),
                 sh.metrics.peak_visible,
@@ -339,6 +348,14 @@ impl Primitive for CanvasPrimitive {
                 stats.placeholder,
                 stats.uploads,
                 stats.evictions,
+                // The camera is here because the report is the only thing this
+                // host says. Without it, proving that a drag or a wheel reached
+                // the canvas means waiting for a frame threshold that a short
+                // gesture never reaches, which is how "the mouse does nothing"
+                // stays indistinguishable from "the report is too coarse".
+                sh.app.viewport.scale,
+                sh.app.viewport.center.x,
+                sh.app.viewport.center.y,
             );
             sh.metrics.clear();
         }

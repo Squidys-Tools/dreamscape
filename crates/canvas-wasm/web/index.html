@@ -215,7 +215,19 @@
             "wheel",
             (e) => {
               e.preventDefault();
-              host.wheel(...at(e), e.deltaY);
+              // Browsers disagree about wheel units and only Chromium defaults to
+              // pixels. Mode 1 is lines and mode 2 is pages, so a Firefox wheel
+              // arrives as 3 where a Chromium one arrives as 100, and taking the
+              // raw value would make zoom 30x weaker in one browser than the
+              // other. 100 is the notch size `canvas_core` already assumes.
+              const perNotch = 100;
+              const dy =
+                e.deltaMode === 1
+                  ? e.deltaY * perNotch
+                  : e.deltaMode === 2
+                    ? e.deltaY * board.height
+                    : e.deltaY;
+              host.wheel(...at(e), dy);
             },
             { passive: false },
           );

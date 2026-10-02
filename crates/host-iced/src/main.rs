@@ -33,7 +33,7 @@ mod canvas_widget;
 
 use std::sync::{Arc, Mutex};
 
-use canvas_app::{AppState, Config};
+use canvas_app::{AppState, Config, Motion};
 use canvas_core::{PointerEvent, PointerPhase, Vec2, WheelEvent};
 use iced::mouse::{self, Button, ScrollDelta};
 use iced::{Element, Event, Fill, Point, Subscription, Task, Theme};
@@ -42,6 +42,14 @@ use canvas_widget::{CanvasProgram, Shared};
 
 /// The canvas renders this many items, matching the headless benchmark.
 const ITEMS: u32 = 8_000;
+
+/// One wheel notch, in the pixel units `AppState::wheel` expects.
+///
+/// `canvas_core` scales zoom by pixels per notch, so this is the conversion that
+/// makes a notch feel the same here as it does in the browser. It is the number
+/// that has to agree between the two hosts, which is why it is named rather than
+/// inlined at the use site.
+const NOTCH_PIXELS: f32 = 100.0;
 
 struct App {
     shared: Arc<Mutex<Shared>>,
@@ -80,11 +88,14 @@ fn subscription(_app: &App) -> Subscription<Msg> {
         Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Msg::Cursor(position)),
         Event::Mouse(mouse::Event::ButtonPressed(Button::Left)) => Some(Msg::Pressed(true)),
         Event::Mouse(mouse::Event::ButtonReleased(Button::Left)) => Some(Msg::Pressed(false)),
-        // Line-based deltas have no pixel size to scale by, and every desktop
-        // browser sends pixels, so lines are dropped rather than guessed at.
-        Event::Mouse(mouse::Event::WheelScrolled {
-            delta: ScrollDelta::Pixels { x, y },
-        }) => Some(Msg::Wheel(Vec2::new(x, y))),
+        Event::Mouse(mouse::Event::WheelScrolled { delta }) => Some(Msg::Wheel(match delta {
+            ScrollDelta::Pixels { x, y } => Vec2::new(x, y),
+            // Windows reports the wheel in notches, not pixels: winit turns
+            // `WHEEL_DELTA` into `LineDelta`, so this is the branch a native host
+            // actually takes and the other one is the browser's. Handling only
+            // pixels left zoom dead on Windows while looking correct in review.
+            ScrollDelta::Lines { x, y } => Vec2::new(x * NOTCH_PIXELS, y * NOTCH_PIXELS),
+        })),
         _ => None,
     })
 }
@@ -96,6 +107,18 @@ impl App {
         let app = AppState::new(Config {
             items: ITEMS,
             textures: ITEMS,
+            // No scripted camera. `Motion::default` is the benchmark's pan and
+            // zoom sweep, and `AppState` advances it on every drawn frame, so
+            // leaving it on meant this host dragged the camera 18 world units
+            // every frame underneath the pointer. A gesture and the script both
+            // moved the camera at once, which is also why the first attempt to
+            // check whether input arrived was unreadable: the camera was never
+            // still. Only the benchmark drives the camera itself.
+            motion: Motion {
+                pan_x: 0.0,
+                pan_y: 0.0,
+                zoom_sweep: 0.0,
+            },
             ..Default::default()
         });
         Self {

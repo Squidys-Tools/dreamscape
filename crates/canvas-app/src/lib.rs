@@ -61,7 +61,11 @@ pub struct SourceTexture {
 /// A distinct, deterministic test image with enough high-frequency detail that
 /// mip levels visibly do work when sampled.
 pub fn make_texture(seed: u32) -> SourceTexture {
-    let mut rng = Rng::new(seed as u64 * 0x9E37_79B9_7F4A_7C15);
+    // `wrapping_mul` because the golden-ratio constant is larger than
+    // `u64::MAX / 2`, so a plain multiply overflows for every seed above 1.
+    // Release wrapped silently and debug panicked on the second texture, which
+    // also meant the two profiles drew different images from the same seed.
+    let mut rng = Rng::new((seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let base = canvas_core::BASE_MIP;
     let blobs: [(f32, f32, f32, [u8; 3]); 5] = std::array::from_fn(|_| {
         (
@@ -472,6 +476,39 @@ impl AppState {
             degraded: canvas.last_frame_degraded,
             uploads: st.uploads_this_frame,
             evictions: st.evictions_total,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The seeding multiply overflowed for every seed above 1, which panicked in
+    /// debug and silently wrapped in release, so the same seed drew a different
+    /// image in the two profiles.
+    #[test]
+    fn texture_seeds_do_not_overflow_and_differ() {
+        let first = make_texture(1);
+        let second = make_texture(2);
+        assert_eq!(
+            first.levels[0],
+            make_texture(1).levels[0],
+            "same seed, same image"
+        );
+        assert_ne!(first.levels[0], second.levels[0], "different seeds differ");
+    }
+
+    /// Every level of a generated pyramid is half the one above it, which is what
+    /// makes the LOD path worth measuring.
+    #[test]
+    fn mip_levels_halve() {
+        for level in &make_texture(7).levels {
+            assert!(level.len() % 4 == 0 && !level.is_empty());
+        }
+        let t = make_texture(7);
+        for pair in t.levels.windows(2) {
+            assert_eq!(pair[1].len() * 4, pair[0].len());
         }
     }
 }
