@@ -2,34 +2,19 @@
   "$schema": "https://t3.codes/schema/t3.json",
   "scripts": [
     {
-      "name": "Check everything",
-      "command": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo check -p canvas-wasm --target wasm32-unknown-unknown && cargo check -p canvas-wasm --target wasm32-unknown-unknown --features webgl && cargo test -p canvas-core",
-      "icon": "test"
-    },
-    {
-      "name": "Format",
-      "command": "cargo fmt --all",
-      "icon": "configure"
-    },
-    {
-      "name": "Typecheck",
-      "command": "cargo check --workspace --all-targets && cargo check -p canvas-wasm --target wasm32-unknown-unknown",
-      "icon": "lint"
-    },
-    {
-      "name": "Clippy",
-      "command": "cargo clippy --workspace --all-targets",
-      "icon": "lint"
-    },
-    {
-      "name": "Unit tests",
-      "command": "cargo test -p canvas-core",
-      "icon": "test"
-    },
-    {
-      "name": "Bench 2k/8k/20k",
-      "command": ".\\scripts\\bench.ps1",
+      "name": "Run desktop host",
+      "command": "cargo run -p host-iced --release",
       "icon": "play"
+    },
+    {
+      "name": "Run browser canvas",
+      "command": ".\\scripts\\web-bench.ps1 -Scenario quick",
+      "icon": "play"
+    },
+    {
+      "name": "Probe surface (SQU-73)",
+      "command": "cargo run -p probe-surface --release",
+      "icon": "debug"
     },
     {
       "name": "Bench quick",
@@ -37,39 +22,24 @@
       "icon": "play"
     },
     {
-      "name": "Bench scale",
+      "name": "Bench full sweep",
+      "command": ".\\scripts\\bench.ps1",
+      "icon": "play"
+    },
+    {
+      "name": "Bench all on screen",
       "command": ".\\scripts\\bench.ps1 -Scenario scale",
       "icon": "play"
     },
     {
-      "name": "Bench 8k single",
-      "command": "cargo run -p canvas-harness --bin bench --release -- --items=8000 --textures=8000",
-      "icon": "play"
+      "name": "Check before commit",
+      "command": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo test --workspace --exclude canvas-wasm && cargo check -p canvas-wasm --target wasm32-unknown-unknown && cargo check -p canvas-wasm --target wasm32-unknown-unknown --features webgl",
+      "icon": "lint"
     },
     {
-      "name": "Browser canvas (interactive)",
-      "command": ".\\scripts\\web-bench.ps1 -Scenario quick",
-      "icon": "play"
-    },
-    {
-      "name": "Browser canvas (measured)",
-      "command": ".\\scripts\\web-bench.ps1 -Scenario quick -Measure -ResultLog bench-web.txt",
-      "icon": "play"
-    },
-    {
-      "name": "Browser canvas (WebGL2 fallback, measured)",
-      "command": ".\\scripts\\web-bench.ps1 -Backend webgl -Scenario quick -Measure -ResultLog bench-web-gl.txt",
-      "icon": "play"
-    },
-    {
-      "name": "Run iced host (re-test, was blank)",
-      "command": "cargo run -p host-iced --release",
-      "icon": "debug"
-    },
-    {
-      "name": "Run surface probe (should be magenta, SQU-73)",
-      "command": "cargo run -p probe-surface --release",
-      "icon": "debug"
+      "name": "Format",
+      "command": "cargo fmt --all",
+      "icon": "configure"
     }
   ]
 }
