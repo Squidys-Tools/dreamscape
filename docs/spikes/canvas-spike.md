@@ -283,6 +283,50 @@ host can be visually verified or timed.** On the second machine they can, which 
 what unblocks the idle-machine re-measurement and the toolkit comparison. Anything
 requiring a window should say which machine it happened on.
 
+## Driving the desktop host with a mouse
+
+`host-iced` had never been driven by a person. Every result in this document came out
+of the harness, and the harness never sends a pointer event. Four defects came out of
+one session with a real mouse, and not one of them was visible in the diff.
+
+**Debug builds panicked on the first frame.** `make_texture` seeded its RNG with
+`seed as u64 * 0x9E37_79B9_7F4A_7C15`, and that constant is larger than
+`u64::MAX / 2`, so every seed above one overflowed. Release wrapped silently and drew
+a picture, debug panicked on the second texture, and the two profiles were drawing
+different images from the same seed. `Rng::new` already used `wrapping_mul`. This now
+matches, with a test that asserts seeds neither overflow nor collide.
+
+**The host was driving its own camera.** `Motion::default` is the harness's pan and
+zoom sweep rather than a still camera, and `AppState` advances it every drawn frame.
+The board slid 18 world units per frame underneath the pointer, which made it
+impossible to tell a gesture landing from the script running. Zeroed now, because only
+the harness should script the camera.
+
+**The wheel did nothing on Windows, and the cause was a browser assumption.** The
+handler matched `ScrollDelta::Pixels` only, which is what a browser sends. winit
+reports the native wheel in notches as `LineDelta`, so the branch a native host
+actually takes was the one that had been dropped. The browser page had the matching
+half of the same bug, passing `e.deltaY` raw and ignoring `deltaMode`, which works on
+Chromium and makes a Firefox wheel about 30x too weak. Both are fixed against the
+100px notch `canvas-core` already assumes, so the two hosts step the same distance.
+
+**An idle window reported nothing at all.** The line printed every 120 frames and iced
+redraws on demand, so an untouched window stayed silent and a host that never drew
+looked exactly like one that worked. The first frame reports on its own now, and the
+camera is on the line. That second part is what makes a gesture confirmable without
+waiting out a 120-frame threshold a short gesture never reaches, which is how "the
+mouse does nothing" stays indistinguishable from "the report is too coarse".
+
+That session proved two things. The first frame reports 1280x960 with 8,000 items
+drawn and zero placeholders. A 300px drag moved the camera centre by the distance and
+direction the current scale predicts, with evictions going from 0 to 99.
+
+It did not prove the wheel. Input only landed once, immediately after the window had
+been activated, and 150 real notches then moved the camera zero pixels. So the notch
+fix is code review and nothing else, and it should not be read as a confirmed
+behaviour change. `host-iced` on the second machine is a one-command test, and it is
+the only thing that settles both the wheel and the presentation.
+
 ## Findings that changed the design
 
 **The WebGL2 floor rules out storage buffers.** Committing to WebGL2 as the
@@ -366,12 +410,14 @@ intended stack.
 - Restore a GPU-vs-CPU split if any decision depends on which side is the
   bottleneck. More pressing than it was: the wall is now superlinear, which is
   what fill-rate pressure looks like, and that is a GPU-side cause.
-- **`host-iced` has never rendered anywhere, and both reasons for that are now
-  different.** The canvas shader was clipping every quad, which is fixed, and the
-  dev laptop cannot present, which is a machine fault the second machine does not
-  have. Running it on the second machine is a one-command test nobody has done, and
-  it is the last unknown on the native side. Assess it as a product shell, not as a
-  frame-time benchmark.
+- **`host-iced` has still never been confirmed on a screen, and the reasons have
+  changed twice.** The canvas shader was clipping every quad, which is fixed. Then a
+  session driving it with a real mouse found the host was applying the harness camera
+  sweep every frame and that the wheel handler dropped the notch branch entirely, so
+  a counter-only run could not have told either. What is left is the dev laptop, which
+  cannot present, which is a machine fault the second machine does not have. Running
+  it there is a one-command test nobody has done, and it settles the wheel and the
+  presentation together. Assess it as a product shell, not as a frame-time benchmark.
 - Zed's UI toolkit (`wgpu`, formerly `gpui`): establish whether it is dependable
   as an external dependency before anything else. The pinned wgpu version
   matters more than anything else about it.

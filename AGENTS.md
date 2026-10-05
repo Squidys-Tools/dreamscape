@@ -155,7 +155,7 @@ Full reasoning, and the findings that shaped it, in `docs/spikes/canvas-spike.md
 - `crates/canvas-app` is the scene, camera, selection, search and the per-frame pipeline. Every consumer links this, so the only thing that differs between them is how the chrome is drawn.
 - `crates/canvas-harness` is the headless driver over `canvas-app` plus frame metrics. No asset files.
 - `crates/canvas-wasm` is the browser host, and the only crate that may depend on `wasm-bindgen`. It is thin on purpose: it owns a GPU context, a clock and the compositor, and nothing else. `web/` is the page, the local server and the capture endpoint; `pkg/` is generated.
-- `crates/host-iced` is an iced 0.14 host sharing one wgpu device with the canvas. It compiles and has never rendered a pixel; see the known-broken list.
+- `crates/host-iced` is an iced 0.14 host sharing one wgpu device with the canvas. It draws and its counters read healthy, but nothing on it has been confirmed against a screen; see the known-broken list.
 - `crates/probe-surface` is a throwaway raw winit plus wgpu control. Delete it once presentation works.
 - `scripts/bench.ps1` is the native benchmark runner, `scripts/web-bench.ps1` the browser one. `docs/spikes/canvas-spike.md` is the only internals document.
 
@@ -170,6 +170,7 @@ Recorded so nobody re-derives the failure. Tracked in Linear.
 - **A headless browser will not confirm that a WebGPU canvas is presented.** The page screenshot is blank and `createImageBitmap` on the canvas reads an empty layer, while a 2D control reads back correctly through the same code. Verify the renderer with GPU readback; verify the compositor with a headed browser.
 - **An exported `&mut self` that awaits is a re-entrancy trap in wasm.** The borrow is held until the future resolves, so any JS call into the same object in that window throws `recursive use of an object detected which would lead to unsafe aliasing in rust`. It reads as dropped input, not a crash. Keep mutable state behind a `RefCell` and take `&self` on exports, so no borrow is live across an await.
 - **A driven path that was only ever scripted stays broken.** The benchmark route into the browser worked, and the interactive route was dead twice over, both times only visible once something sent real pointer and wheel events. Exercise the path a person uses, not just the one the harness uses.
+- **Wheel zoom on the native host is fixed and unverified.** The handler matched `ScrollDelta::Pixels` only, which is what a browser sends, while winit reports the native wheel in notches as `LineDelta`. Both are handled now, against the 100px notch `canvas-core` assumes, and the browser page stopped ignoring `deltaMode`. Pan is proven, by a 300px drag that moved the camera centre as the scale predicts. Zoom is not: input only landed once, right after the window had been activated, and 150 real notches moved the camera zero pixels. Treat it as a code change with no evidence behind it until someone scrolls on the second machine.
 
 ## Taste
 
