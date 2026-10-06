@@ -266,12 +266,17 @@
           e instanceof Error ? `${e.name}: ${e.message}\n${e.stack ?? ""}` : String(e);
         console.error("canvas host failed:", e);
         show(`<b>failed</b>\n${detail.split("\n").slice(0, 6).join("\n")}`, "err");
-        // Still report, so a failed run leaves a trace instead of a blank page.
-        await fetch("/result", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ error: detail.split("\n")[0], backend, scene }),
-        }).catch(() => {});
+        // Measured runs only. A measured run that died leaves a trace instead of
+        // a blank page, but an ERROR line from the interactive page is a failure
+        // nobody was measuring, landing in the log beside real scenario results
+        // and reading like one of them.
+        if (bench) {
+          await fetch("/result", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ error: detail.split("\n")[0], backend, scene }),
+          }).catch(() => {});
+        }
       }
     </script>
   </body>

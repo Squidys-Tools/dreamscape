@@ -302,6 +302,24 @@ The board slid 18 world units per frame underneath the pointer, which made it
 impossible to tell a gesture landing from the script running. Zeroed now, because only
 the harness should script the camera.
 
+Zeroing `Motion` turned out not to be enough, and the reason is the interesting part
+of this. `AppState::draw_frame` assigns `viewport.scale` whenever `animate` is set,
+not whenever `zoom_sweep` is non-zero:
+
+```rust
+if self.animate {
+    self.viewport.scale = self.start_scale * (1.0 - t * self.motion.zoom_sweep);
+}
+```
+
+At `zoom_sweep == 0.0` that is exactly `start_scale`, so every drawn frame put the
+scale back and threw away whatever `zoom_at` had just computed for the wheel. Pan
+survived the same bug because nothing else rewrites `viewport.center`. So the sweep
+was doing two separate jobs, and turning off one of them by zeroing its input left the
+other still running. `host-iced` sets `animate = false` instead. The tempting fix,
+guarding on `zoom_sweep != 0.0`, would hide the real defect and change what the
+benchmark measures.
+
 **The wheel did nothing on Windows, and the cause was a browser assumption.** The
 handler matched `ScrollDelta::Pixels` only, which is what a browser sends. winit
 reports the native wheel in notches as `LineDelta`, so the branch a native host
@@ -322,10 +340,16 @@ drawn and zero placeholders. A 300px drag moved the camera centre by the distanc
 direction the current scale predicts, with evictions going from 0 to 99.
 
 It did not prove the wheel. Input only landed once, immediately after the window had
-been activated, and 150 real notches then moved the camera zero pixels. So the notch
-fix is code review and nothing else, and it should not be read as a confirmed
-behaviour change. `host-iced` on the second machine is a one-command test, and it is
-the only thing that settles both the wheel and the presentation.
+been activated, and 150 real notches then moved the camera zero pixels. Two separate
+defects were on that path and neither has been driven since, so read this as code
+review rather than a confirmed behaviour change. `host-iced` on the second machine is a
+one-command test, and it is the only thing that settles both the wheel and the
+presentation.
+
+One smaller thing from reading the report rather than driving it: `Metrics::clear`
+emptied `samples` but left `peak_visible`, so every line after the first reported a
+session-lifetime peak beside percentiles from the last 120 frames. `clear` resets it
+now. No published figure moves, because the harness never clears mid-run.
 
 ## Findings that changed the design
 

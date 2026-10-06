@@ -190,7 +190,7 @@ try {
   if ($ResultLog) {
     Write-Host "posting results to $ResultLog once each measure URL has run." -ForegroundColor DarkGray
     if (-not $Measure) {
-      Write-Host 'note: the interactive page posts nothing. re-run with -Measure to capture a number.' -ForegroundColor DarkGray
+      Write-Host 'note: the interactive page posts nothing, not even a failure. re-run with -Measure to capture a number.' -ForegroundColor DarkGray
     }
   } else {
     Write-Host 'running. ctrl-c to stop.' -ForegroundColor DarkGray

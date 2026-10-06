@@ -253,8 +253,15 @@ impl Metrics {
         self.peak_visible = self.peak_visible.max(stats.visible);
         self.samples.push(FrameSample { cpu, stats });
     }
+    /// Drop the current measurement window, peak included.
+    ///
+    /// `peak_visible` has to reset with the samples. Every other aggregate here is
+    /// derived from `samples`, so a peak left behind describes a window nobody is
+    /// reading: a host reporting mean, p99 and `over` from the last 120 frames
+    /// beside an all-session peak reads as one measurement and is not one.
     pub fn clear(&mut self) {
         self.samples.clear();
+        self.peak_visible = 0;
     }
     pub fn len(&self) -> usize {
         self.samples.len()

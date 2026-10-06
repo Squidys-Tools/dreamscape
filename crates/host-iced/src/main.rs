@@ -104,7 +104,7 @@ fn subscription(_app: &App) -> Subscription<Msg> {
 /// functions, so these are inherent methods.
 impl App {
     fn new() -> Self {
-        let app = AppState::new(Config {
+        let mut app = AppState::new(Config {
             items: ITEMS,
             textures: ITEMS,
             // No scripted camera. `Motion::default` is the benchmark's pan and
@@ -121,6 +121,14 @@ impl App {
             },
             ..Default::default()
         });
+        // Zeroing the sweep above is not enough on its own. `draw_frame` assigns
+        // `viewport.scale` whenever `animate` is set rather than whenever the
+        // sweep is non-zero, so at `zoom_sweep == 0.0` every drawn frame put the
+        // scale back to `start_scale` and discarded whatever `zoom_at` had just
+        // computed for the wheel. Pan survived that because nothing rewrites the
+        // centre. Input drives the camera on this host, so the scripted advance
+        // is off.
+        app.animate = false;
         Self {
             shared: Arc::new(Mutex::new(Shared::new(app))),
             cursor: None,
