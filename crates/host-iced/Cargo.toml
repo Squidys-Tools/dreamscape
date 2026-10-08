@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+# Two binaries (src/main.rs and src/bin/smoke.rs), so `cargo run -p host-iced`
+# without a --bin flag cannot pick one. Pick the window on every invocation,
+# because README, t3.json and people all type the bare form.
+default-run = "host-iced"
 
 [dependencies]
 canvas-core.workspace = true

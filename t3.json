@@ -40,6 +40,12 @@
       "name": "Format",
       "command": "cargo fmt --all",
       "icon": "configure"
+    },
+    {
+      "name": "Clean worktree on settle",
+      "command": "cargo clean",
+      "icon": "configure",
+      "runOnSettle": true
     }
   ]
 }
