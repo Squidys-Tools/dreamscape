@@ -69,7 +69,8 @@ We need to be on the same page with terminology. When communicating, use this la
 - **frame time** means CPU submit plus a hard `device.poll(Wait)`. It serialises CPU and GPU, so it is a ceiling rather than a typical frame.
 - **over budget** means frames over 16.67ms, the 60fps threshold.
 - **seam** means the small interface between the canvas and whatever hosts it. One definition, two implementations.
-- **desktop shell** means the native Rust UI on Windows. Shares one wgpu device with the canvas.
+- **desktop shell** means the native Rust UI on Windows. Native precisely so it can share one wgpu device with the canvas, which today it does through iced. Sharing is a property of that renderer, not of any candidate shell. See **gpui**.
+- **gpui** means Zed's UI framework, the alternative to iced under comparison in SQU-77. Three crates get conflated here and none is a rename of another: `gpui` is the framework, `wgpu` is our renderer, `gpui_wgpu` is Zed's own wgpu backend for non-Metal targets. On Windows gpui is D3D11On12 and never touches wgpu, so it cannot share our device and would be a second graphics stack plus a copy per frame. It does compile to wasm upstream, through `gpui_web`, and we do not use that: the shell is native, and `canvas-wasm` is the only thing in this repo that crosses to wasm.
 - **hosted tier** means the paid web version. View and modify only; you cannot add anything to it.
 - **capture-only** means the browser extension's entire job. It carries no canvas and no UI.
 - **spike** means code that exists to produce a measurement or settle a question, not to ship.
