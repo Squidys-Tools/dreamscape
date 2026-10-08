@@ -442,9 +442,13 @@ intended stack.
   cannot present, which is a machine fault the second machine does not have. Running
   it there is a one-command test nobody has done, and it settles the wheel and the
   presentation together. Assess it as a product shell, not as a frame-time benchmark.
-- Zed's UI toolkit (`wgpu`, formerly `gpui`): establish whether it is dependable
-  as an external dependency before anything else. The pinned wgpu version
-  matters more than anything else about it.
+- Zed's `gpui`: dependable, and it cannot share our device. SQU-76 settled the dependency
+  question by precedent, because we already ship it twice — Zest on crates.io `gpui 0.2.2`,
+  Orca on a pinned Zed rev. There is no wgpu version to match: on Windows gpui is D3D11On12
+  and never touches wgpu at all, so `canvas-gpu` and gpui would be two graphics stacks with a
+  copy per frame between them. `gpui_wgpu` is a third crate, Zed's backend for non-Metal
+  targets, and is not a synonym for either of the others. What is left is whether that is worth
+  gpui's platform integration and styling, which is SQU-77's to weigh.
 - Choose between them, and record the reasoning.
 - Canvas text via `cosmic-text` + `glyphon`. Anything drawn in the renderer is
   shared between desktop and web, and the chrome is not, so this is the
