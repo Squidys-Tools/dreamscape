@@ -1,0 +1,37 @@
+[package]
+name = "canvas-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The fallback, not a second renderer. wgpu compiles both browser backends into
+# the same build and picks one from `InstanceDescriptor.backends`, so switching
+# is a runtime choice and the seam below is unchanged. It is off by default
+# because it drags wgpu-hal and GLES in, which roughly doubles the bundle for a
+# path most browsers will never take.
+default = []
+webgl = ["wgpu/webgl"]
+
+[dependencies]
+canvas-core.workspace = true
+canvas-gpu.workspace = true
+canvas-app.workspace = true
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# `wgpu` is a default feature, and `webgpu` is on by default in wgpu 27, so this
+# dependency line is where the WebGPU backend arrives. It is spelled out anyway
+# because the browser backend otherwise appears by nobody's action, and the next
+# person to wonder why the web build has no WebGPU needs the answer to be here.
+wgpu.workspace = true
+web-sys = { version = "0.3", features = [
+    "HtmlCanvasElement",
+    "Performance",
+    "Window",
+] }
+
+[lib]
+crate-type = ["cdylib", "rlib"]

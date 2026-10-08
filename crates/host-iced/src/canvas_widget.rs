@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use canvas_app::{AppState, Metrics};
+use canvas_app::{AppState, Metrics, BUDGET_MS};
 use canvas_gpu::GpuCanvas;
 use iced::advanced::graphics::core::Rectangle;
 use iced::advanced::graphics::Viewport;
@@ -26,9 +26,21 @@ pub struct Shared {
     pub last_size: (u32, u32),
     pub last_uploads: u32,
     pub last_evictions: u64,
+    /// Logical-to-device ratio, taken from iced rather than assumed to be 1.
+    ///
+    /// Pointer events arrive in logical pixels and the canvas draws in device
+    /// pixels, so the input path needs this and there is exactly one place that
+    /// knows it.
+    pub scale_factor: f32,
+    /// Frames since the last stdout line, so reporting does not cost a frame.
+    reported: u64,
 }
 
 impl Shared {
+    /// How often to print a line. Every frame would be a synchronous write into
+    /// the window's stdout from the render thread, which is its own slowness.
+    const REPORT_EVERY: u64 = 120;
+
     pub fn new(app: AppState) -> Self {
         Self {
             app,
@@ -37,6 +49,8 @@ impl Shared {
             last_size: (1, 1),
             last_uploads: 0,
             last_evictions: 0,
+            scale_factor: 1.0,
+            reported: 0,
         }
     }
 }
@@ -224,6 +238,7 @@ impl Primitive for CanvasPrimitive {
         let w = ((bounds.width * viewport.scale_factor()).round() as u32).max(1);
         let h = ((bounds.height * viewport.scale_factor()).round() as u32).max(1);
         sh.last_size = (w, h);
+        sh.scale_factor = viewport.scale_factor();
 
         let needs_target = match &pipeline.target {
             Some(t) => t.width() != w || t.height() != h,
@@ -300,11 +315,50 @@ impl Primitive for CanvasPrimitive {
         // The host owns the clock. `start` was taken at the top of `update`,
         // so this is the whole host frame, canvas work included.
         sh.metrics.push(start.elapsed(), stats);
-        if sh.metrics.len() > 3_000 {
+
+        // Reported on stdout rather than in a panel. A panel is rebuilt every
+        // frame, and the one this replaced was calling `percentiles` and two
+        // sums over every sample sixty times a second to display numbers
+        // `scripts/bench.ps1` already prints properly.
+        //
+        // It is also the only place the real target size is visible. The panel
+        // reported `canvas 1x1` and `frames 0` while a full board was plainly on
+        // screen, and nothing on screen could say which of the two was lying.
+        sh.reported += 1;
+        // The first frame is reported on its own, and immediately.
+        //
+        // Two reasons, both learned the hard way. A host that never draws is
+        // otherwise indistinguishable from one that draws slowly, which is how a
+        // panel once reported `frames 0` next to a plainly visible board. And iced
+        // only redraws on demand, so an untouched window never reaches a
+        // 120-frame threshold and prints nothing at all, leaving a working host
+        // looking identical to a dead one.
+        if sh.reported == 1 || sh.reported.is_multiple_of(Shared::REPORT_EVERY) {
+            let (mean, _p50, p99, max, over) = sh.metrics.percentiles(BUDGET_MS);
+            eprintln!(
+                "host-iced  {w}x{h}  frames {}  mean {mean:.2}ms  p99 {p99:.2}ms  \
+                 max {max:.2}ms  over {over}/{}  peak visible {}  drawn {}  \
+                 degraded {}  placeholders {}  uploads {}  evictions {}  \
+                 camera {:.4} at {:.0},{:.0}",
+                sh.metrics.len(),
+                sh.metrics.len(),
+                sh.metrics.peak_visible,
+                stats.drawn,
+                stats.degraded,
+                stats.placeholder,
+                stats.uploads,
+                stats.evictions,
+                // The camera is here because the report is the only thing this
+                // host says. Without it, proving that a drag or a wheel reached
+                // the canvas means waiting for a frame threshold that a short
+                // gesture never reaches, which is how "the mouse does nothing"
+                // stays indistinguishable from "the report is too coarse".
+                sh.app.viewport.scale,
+                sh.app.viewport.center.x,
+                sh.app.viewport.center.y,
+            );
             sh.metrics.clear();
         }
-        // Measured so the harness can compare host time against canvas time.
-        let _ = start;
     }
 
     /// Blit inside iced's existing render pass, GPU-side. No CPU copy.

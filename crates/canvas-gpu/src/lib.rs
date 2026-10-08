@@ -22,7 +22,7 @@
 //! and that is what this crate is here to measure.
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use canvas_core::{Vec2, VisibleItem, MIP_LEVELS};
 
@@ -537,9 +537,23 @@ struct Instance {
     tint: [f32; 4],
 }
 
+/// Byte size of the projection uniform, and its length in `u64` terms.
+///
+/// Spelled out once because the buffer, the binding and the layout all have to
+/// agree, and a mismatch between them is a runtime validation error rather than
+/// a compile error.
+const VIEWPORT_BYTES: NonZeroU64 = match NonZeroU64::new(8) {
+    Some(n) => n,
+    // A const context cannot unwrap, and 8 is not zero.
+    None => unreachable!(),
+};
+
 const SHADER: &str = r#"
 @group(0) @binding(0) var atlas : texture_2d<f32>;
 @group(0) @binding(1) var samp  : sampler;
+
+struct Viewport { size : vec2<f32> };
+@group(0) @binding(2) var<uniform> view : Viewport;
 
 struct VSOut {
     @builtin(position) pos : vec4<f32>,
@@ -562,7 +576,17 @@ fn vs(
     let c = corners[vi];
 
     var out : VSOut;
-    out.pos = vec4<f32>(rect.xy + c * rect.zw, 0.0, 1.0);
+    // Rects arrive in device pixels, which is the space culling and LOD both work
+    // in, so the projection happens here rather than on the CPU for every item on
+    // every frame. Clip space is -1..1 with y pointing up and pixels pointing
+    // down, hence the flip on y.
+    let px = rect.xy + c * rect.zw;
+    out.pos = vec4<f32>(
+        px.x / view.size.x * 2.0 - 1.0,
+        1.0 - px.y / view.size.y * 2.0,
+        0.0,
+        1.0,
+    );
     out.uv = mix(uv_rect.xy, uv_rect.zw, c);
     out.tint = tint;
     return out;
@@ -583,6 +607,10 @@ pub struct GpuCanvas {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
+    /// The render target's size in device pixels. One uniform for the whole
+    /// board rather than a per-instance clip-space rect, so a resize does not
+    /// invalidate the instance data.
+    viewport: wgpu::Buffer,
     instance_capacity: u64,
     pub background: [f32; 4],
     /// Visible items skipped last frame because their texture had no atlas slot.
@@ -631,6 +659,19 @@ impl GpuCanvas {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        // Without this the pipeline layout cannot be validated
+                        // against the shader, and the error surfaces as a
+                        // validation failure on first draw rather than at build.
+                        min_binding_size: Some(VIEWPORT_BYTES),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -644,6 +685,15 @@ impl GpuCanvas {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        let viewport = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("canvas-viewport"),
+            size: VIEWPORT_BYTES.get(),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Written before the first draw, so the first frame is not garbage.
+        queue.write_buffer(&viewport, 0, bytemuck::cast_slice(&[1.0f32, 1.0]));
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("canvas-sampler"),
@@ -667,6 +717,14 @@ impl GpuCanvas {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &viewport,
+                        offset: 0,
+                        size: Some(VIEWPORT_BYTES),
+                    }),
                 },
             ],
         });
@@ -714,6 +772,7 @@ impl GpuCanvas {
             pipeline,
             bind_group,
             instances,
+            viewport,
             instance_capacity: capacity.get() as u64,
             background: [0.09, 0.09, 0.10, 1.0],
             last_frame_dropped: 0,
@@ -748,6 +807,9 @@ impl GpuCanvas {
 
     /// Build instances and issue a single instanced draw.
     ///
+    /// `size` is the render target in device pixels, and it feeds the projection
+    /// uniform rather than being baked into the instances.
+    ///
     /// Returns the number actually drawn, which may be fewer than
     /// `visible.len()` if the atlas could not free space in time.
     pub fn draw(
@@ -757,6 +819,7 @@ impl GpuCanvas {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         visible: &[VisibleItem],
+        size: Vec2,
     ) -> u32 {
         let mut batch: Vec<Instance> = Vec::with_capacity(visible.len());
         let mut dropped = 0u32;
@@ -807,6 +870,14 @@ impl GpuCanvas {
             0,
             bytemuck::cast_slice(&batch[..batch.len().min(self.instance_capacity as usize)]),
         );
+        // The one value that makes a pixel-space rect mean anything in clip
+        // space. Clamped to at least one pixel so a zero-sized target cannot
+        // produce a NaN that quietly blanks every subsequent frame.
+        queue.write_buffer(
+            &self.viewport,
+            0,
+            bytemuck::cast_slice(&[size.x.max(1.0), size.y.max(1.0)]),
+        );
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -846,6 +917,13 @@ impl GpuCanvas {
 /// The surface format is fixed rather than queried: `get_capabilities` lives on
 /// `Surface` in wgpu 27, and a headless pass has no surface. Hosts that do have
 /// one (iced, WGPUI) pass their own format into [`GpuCanvas::new`].
+///
+/// Native only, and not because a browser lacks the concept. `block_on` parks
+/// the calling thread, and there is no second thread in a wasm module to wake
+/// it: a browser adapter can only be requested from a future that JS drives, so
+/// this function cannot work there however it is written. The web host goes
+/// through `Instance::create_surface` instead.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn headless_device() -> (
     wgpu::Device,
     wgpu::Queue,

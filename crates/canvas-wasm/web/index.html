@@ -1,0 +1,283 @@
+<!doctype html>
+<!--
+  The browser half of the canvas spike. Everything under `pkg/` is wasm-pack
+  output and is not committed.
+
+  Scenario parameters come off the query string and are named exactly as the
+  matching `bench` flags are, so one scenario can be described to both runners
+  and the two RESULT lines can be read next to each other. Anything left off
+  takes the same default the Rust side does.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>dreamscape canvas - browser host</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        background: #101014;
+        color: #d8d8e0;
+        font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      }
+      #board {
+        display: block;
+        width: 100vw;
+        height: 70vh;
+        background: #17171c;
+        touch-action: none;
+      }
+      #readout { padding: 10px 14px; white-space: pre-wrap; }
+      #readout b { color: #8ad7ff; font-weight: 600; }
+      .err { color: #ff8f8f; }
+    </style>
+  </head>
+  <body>
+    <canvas id="board"></canvas>
+    <div id="readout">loading…</div>
+
+    <script type="module">
+      import init, { CanvasHost } from "../pkg/canvas_wasm.js";
+
+      const q = new URLSearchParams(location.search);
+      const num = (name, fallback) => {
+        const raw = q.get(name);
+        if (raw === null) return fallback;
+        const v = Number(raw);
+        if (!Number.isFinite(v)) throw new Error(`${name}=${raw} is not a number`);
+        return v;
+      };
+
+      // The measured run, when `bench=1`. Same defaults as the harness so the
+      // two agree without anyone having to remember a second set of numbers.
+      const scene = {
+        items: num("items", 2000),
+        textures: num("textures", 2000),
+        atlas: num("atlas", 2048),
+        extent: num("extent", 1000),
+        pan: num("pan", 18),
+        zoom: num("zoom", 0.7),
+      };
+      const warmup = num("warmup", 120);
+      const frames = num("frames", 200);
+      const bench = q.get("bench") === "1";
+      const backend = q.get("backend") ?? "auto";
+
+      // Device pixels, matching the harness viewport when given. A CSS-scaled
+      // canvas is multiplied exactly once, here, so the pointer coordinates the
+      // host receives are the device pixels it renders in.
+      //
+      // `width` and `height` are already device pixels. They name a viewport to
+      // match the native runner's, and scaling them by the device pixel ratio
+      // would quietly render a larger board than the number claims - which is
+      // how a comparable figure becomes a different measurement.
+      const dpr = num("dpr", window.devicePixelRatio || 1);
+      const board = document.getElementById("board");
+      const readout = document.getElementById("readout");
+      const fixedWidth = num("width", 0);
+      const fixedHeight = num("height", 0);
+
+      const sizeCanvas = () => {
+        const w = fixedWidth || Math.round(board.clientWidth * dpr);
+        const h = fixedHeight || Math.round(board.clientHeight * dpr);
+        board.width = Math.max(1, w);
+        board.height = Math.max(1, h);
+        return [board.width, board.height];
+      };
+
+      const show = (html, cls = "") => {
+        readout.className = cls;
+        readout.innerHTML = html;
+      };
+
+      // Rejects with `what` if `promise` has not settled in `ms`.
+      //
+      // Requesting an adapter is the step that can quietly never resolve, and a
+      // page that just waits looks identical to a slow load. A marker on the
+      // screen plus this bound means a failure names the step it happened on.
+      const withTimeout = (promise, ms, what) =>
+        Promise.race([
+          promise,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(what)), ms),
+          ),
+        ]);
+
+      try {
+        show("loading the module…");
+        await init();
+        const [w, h] = sizeCanvas();
+
+        show(`creating a ${backend} device on ${w}x${h}…`);
+        const host = await withTimeout(
+          CanvasHost.create(
+            board,
+            scene.items,
+            scene.textures,
+            scene.atlas,
+            scene.extent,
+            scene.pan,
+            scene.zoom,
+            bench,
+            backend,
+          ),
+          // A backend that cannot start should say so. Without this the page sits
+          // on whatever the last marker was, and a panic and a hang are the same
+          // picture, which is how a WebGL2 failure looked like a slow load.
+          30_000,
+          `${backend} did not produce a device within 30s`,
+        );
+        show("device created; reading the first frame back…");
+        host.resize(w, h);
+
+        const describe = (result, verify) => ({
+          adapter: host.adapter(),
+          size: host.size(),
+          backend,
+          scene,
+          warmup,
+          frames,
+          result,
+          verify,
+        });
+
+        // Asked once up front so the page says whether it is drawing something
+        // even if the compositor is not showing it.
+        const verify = await host.verify_pixels();
+
+        if (bench) {
+          show(`measuring ${frames} frames after ${warmup} warmup…`);          const result = await host.run(warmup, frames);
+          // Read the render target back rather than trusting the canvas: a
+          // headless browser will happily screenshot a WebGPU canvas it never
+          // composited, and that is indistinguishable from a renderer that drew
+          // nothing.
+          const after = await host.verify_pixels();
+          show(
+            `<b>${result}</b>\n${after}\nadapter  ${host.adapter()}\n` +
+              `size     ${host.size()}\nbackend  ${backend}\n` +
+              `scene    ${scene.items} items, ${scene.textures} distinct, ` +
+              `extent ${scene.extent}, pan ${scene.pan}, zoom ${scene.zoom}\n` +
+              `<pre style="margin:8px 0 0">${host.verify_map()}</pre>`,
+          );
+          // Hand the line to the capture server. Reading it off a screenshot is
+          // transcription, and a transcribed figure is not a reproducible one.
+          await fetch("/result", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(describe(result, after)),
+          });
+        } else {
+          // Interactive: the same seam, driven by the compositor instead of a
+          // frame count. Motion is off so the pointer owns the camera.
+          let dragging = false;
+          // Derived from the element's own geometry rather than from
+          // `devicePixelRatio`: the two only agree when the CSS box happens to be
+          // the viewport the buffer was sized from, and this page can force a
+          // buffer size the CSS box knows nothing about.
+          const at = (e) => {
+            const r = board.getBoundingClientRect();
+            return [
+              (e.clientX - r.left) * (board.width / r.width),
+              (e.clientY - r.top) * (board.height / r.height),
+            ];
+          };
+          board.addEventListener("pointerdown", (e) => {
+            dragging = true;
+            // The host call comes first on purpose. `setPointerCapture` throws
+            // if the pointer id is not one the browser considers active, and it
+            // did exactly that here, which meant an exception fired before the
+            // press ever reached the canvas and panning silently never started.
+            // Capture is the part that keeps receiving moves once the cursor
+            // leaves the element; it is not the part that begins a drag.
+            host.pointer_down(...at(e));
+            try {
+              board.setPointerCapture(e.pointerId);
+            } catch {
+              /* moving outside the canvas will just end the drag early */
+            }
+          });
+          board.addEventListener("pointermove", (e) => {
+            host.pointer_move(...at(e));
+            board.style.cursor = dragging ? "grabbing" : "grab";
+          });
+          // On the window as well as the element, so a release that lands
+          // outside the canvas, or a capture that failed, still ends the drag
+          // instead of leaving the board stuck to the pointer.
+          const release = (e) => {
+            if (!dragging) return;
+            dragging = false;
+            host.pointer_up(...at(e));
+          };
+          board.addEventListener("pointerup", release);
+          board.addEventListener("pointercancel", release);
+          window.addEventListener("pointerup", release);
+          board.addEventListener(
+            "wheel",
+            (e) => {
+              e.preventDefault();
+              // Browsers disagree about wheel units and only Chromium defaults to
+              // pixels. Mode 1 is lines and mode 2 is pages, so a Firefox wheel
+              // arrives as 3 where a Chromium one arrives as 100, and taking the
+              // raw value would make zoom 30x weaker in one browser than the
+              // other. 100 is the notch size `canvas_core` already assumes.
+              const perNotch = 100;
+              const dy =
+                e.deltaMode === 1
+                  ? e.deltaY * perNotch
+                  : e.deltaMode === 2
+                    ? e.deltaY * board.height
+                    : e.deltaY;
+              host.wheel(...at(e), dy);
+            },
+            { passive: false },
+          );
+
+          // One measured frame per animation frame, paced by the GPU wait
+          // inside it, so the number on screen means the same thing the RESULT
+          // line means.
+          const loop = () => {
+            host.tick().then(
+              () => {
+                show(
+                  `<b>${host.result_line()}</b>\n${verify}\nadapter  ${host.adapter()}\n` +
+                    `size     ${host.size()}\ncamera   ${host.camera()}\n` +
+                    `drag to pan, wheel to zoom`,
+                );
+                requestAnimationFrame(loop);
+              },
+              (e) => {
+                // A reconfigure reports itself rather than counting as a frame.
+                if (String(e).includes("reconfigured")) {
+                  host.resize(board.width, board.height);
+                  requestAnimationFrame(loop);
+                } else {
+                  show(String(e), "err");
+                }
+              },
+            );
+          };
+          requestAnimationFrame(loop);
+        }
+      } catch (e) {
+        // Both places. The readout is what a person sees and the console is what
+        // a person needs when the failure is a Rust panic, because the message
+        // wasm prints before it traps is only ever in the console.
+        const detail =
+          e instanceof Error ? `${e.name}: ${e.message}\n${e.stack ?? ""}` : String(e);
+        console.error("canvas host failed:", e);
+        show(`<b>failed</b>\n${detail.split("\n").slice(0, 6).join("\n")}`, "err");
+        // Measured runs only. A measured run that died leaves a trace instead of
+        // a blank page, but an ERROR line from the interactive page is a failure
+        // nobody was measuring, landing in the log beside real scenario results
+        // and reading like one of them.
+        if (bench) {
+          await fetch("/result", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ error: detail.split("\n")[0], backend, scene }),
+          }).catch(() => {});
+        }
+      }
+    </script>
+  </body>
+</html>

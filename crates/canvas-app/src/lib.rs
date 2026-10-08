@@ -4,11 +4,29 @@
 //! how the chrome is drawn. Scene, textures, camera, selection, search and the
 //! per-frame pipeline are identical, which is what makes their frame times
 //! comparable.
+//!
+//! # The seam
+//!
+//! A host does six things, and nothing else. It owns the device, the queue and
+//! the clock; it sizes a target; it forwards pointer and wheel events; it calls
+//! [`AppState::draw_frame`] once per frame; and it reads [`Metrics`]. Every one
+//! of those is defined here or in `canvas-core`, never in a host.
+//!
+//! There is deliberately no trait for it. A host's entire contribution is
+//! `get_current_texture`, a `SystemTime`-shaped clock and an event forwarder,
+//! and a trait over three lines of behaviour would be a name rather than an
+//! abstraction. What stops the hosts from drifting is that they call the same
+//! functions, and that the machine-readable result line is formatted in one
+//! place ([`Metrics::result_line`]) instead of once per host.
+//!
+//! `canvas-harness` and `canvas-wasm` are the two implementations today.
+//! `host-iced` drives the same `draw_frame` but has never rendered (SQU-73), so
+//! it is not evidence of anything.
 
 use std::collections::HashSet;
 use std::time::Duration;
 
-use canvas_core::{Item, SpatialGrid, Vec2, Viewport};
+use canvas_core::{CameraControl, Item, PointerEvent, SpatialGrid, Vec2, Viewport, WheelEvent};
 use canvas_gpu::GpuCanvas;
 
 /// A reproducible little PRNG, so a run is repeatable without a dependency.
@@ -43,7 +61,11 @@ pub struct SourceTexture {
 /// A distinct, deterministic test image with enough high-frequency detail that
 /// mip levels visibly do work when sampled.
 pub fn make_texture(seed: u32) -> SourceTexture {
-    let mut rng = Rng::new(seed as u64 * 0x9E37_79B9_7F4A_7C15);
+    // `wrapping_mul` because the golden-ratio constant is larger than
+    // `u64::MAX / 2`, so a plain multiply overflows for every seed above 1.
+    // Release wrapped silently and debug panicked on the second texture, which
+    // also meant the two profiles drew different images from the same seed.
+    let mut rng = Rng::new((seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let base = canvas_core::BASE_MIP;
     let blobs: [(f32, f32, f32, [u8; 3]); 5] = std::array::from_fn(|_| {
         (
@@ -209,6 +231,15 @@ pub struct FrameSample {
     pub stats: FrameStats,
 }
 
+/// Frame budget for 60fps, in milliseconds.
+///
+/// One definition on purpose. The threshold is part of what the `over` count
+/// *means*, and a runner that quietly used a different one would report a
+/// different verdict for the same frames. `scripts/bench.ps1` keeps its own copy
+/// because PowerShell cannot import it, which is the price of having a script
+/// parser at all.
+pub const BUDGET_MS: f64 = 16.67;
+
 #[derive(Default)]
 pub struct Metrics {
     pub samples: Vec<FrameSample>,
@@ -222,8 +253,15 @@ impl Metrics {
         self.peak_visible = self.peak_visible.max(stats.visible);
         self.samples.push(FrameSample { cpu, stats });
     }
+    /// Drop the current measurement window, peak included.
+    ///
+    /// `peak_visible` has to reset with the samples. Every other aggregate here is
+    /// derived from `samples`, so a peak left behind describes a window nobody is
+    /// reading: a host reporting mean, p99 and `over` from the last 120 frames
+    /// beside an all-session peak reads as one measurement and is not one.
     pub fn clear(&mut self) {
         self.samples.clear();
+        self.peak_visible = 0;
     }
     pub fn len(&self) -> usize {
         self.samples.len()
@@ -259,6 +297,28 @@ impl Metrics {
     pub fn total_degraded(&self) -> u32 {
         self.samples.iter().map(|s| s.stats.degraded).sum()
     }
+
+    /// `key=value` line for scripts and for the browser to hand back.
+    ///
+    /// This is the stable measurement interface, and it lives next to the metric
+    /// rather than in each host so two hosts cannot spell the same number
+    /// differently. `scripts/bench.ps1` parses it and throws on a missing key,
+    /// because a renamed field that reads as `$null` prints as `0` and makes a
+    /// broken run look like a fast one.
+    pub fn result_line(&self, budget_ms: f64) -> String {
+        let (mean, p50, p99, max, over) = self.percentiles(budget_ms);
+        let ph = self.total_placeholder();
+        let deg = self.total_degraded();
+        let vis = self.total_visible();
+        format!(
+            "RESULT frames={} mean_ms={mean:.3} p50_ms={p50:.3} p99_ms={p99:.3} \
+             max_ms={max:.3} over={over} placeholders_pct={:.2} degraded_pct={:.2} peak_visible={}",
+            self.len(),
+            100.0 * ph as f64 / vis.max(1) as f64,
+            100.0 * deg as f64 / vis.max(1) as f64,
+            self.peak_visible
+        )
+    }
 }
 
 /// The whole simulated application. Hosts own this and drive it per frame.
@@ -276,6 +336,9 @@ pub struct AppState {
     pub animate: bool,
     /// Scroll offset in rows, used to exercise the sidebar's virtual list.
     pub list_scroll: u32,
+    /// In-flight drag. Shared by every host, so a drag behaves the same in a
+    /// browser and in a native toolkit.
+    control: CameraControl,
 }
 
 impl AppState {
@@ -310,14 +373,35 @@ impl AppState {
             },
             sources,
             start_scale: cfg.start_scale,
+            search: String::new(),
+            // From the config, not from `Motion::default()`. It used to be the
+            // default, which meant every `--pan` and `--zoom` a runner passed was
+            // accepted and discarded: a scenario that asked for a still board got
+            // a panning one, under a row label that said otherwise.
+            motion: cfg.motion,
             cfg,
             selected: HashSet::new(),
-            search: String::new(),
-            motion: Motion::default(),
             frame: 0,
             animate: true,
             list_scroll: 0,
+            control: CameraControl::default(),
         }
+    }
+
+    /// Forward a pointer event. `size` is the canvas in device pixels, which the
+    /// host already knows and the canvas does not.
+    pub fn pointer(&mut self, ev: PointerEvent, size: Vec2) {
+        self.control.pointer(&mut self.viewport, ev, size);
+    }
+
+    /// Forward a wheel or trackpad event.
+    pub fn wheel(&mut self, ev: WheelEvent, size: Vec2) {
+        self.control.wheel(&mut self.viewport, ev, size);
+    }
+
+    /// Is a drag in progress, so the host can show a grabbing cursor.
+    pub fn dragging(&self) -> bool {
+        self.control.dragging()
     }
 
     /// Items whose id or texture matches the search query.
@@ -388,7 +472,7 @@ impl AppState {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("app-frame"),
         });
-        let drawn = canvas.draw(device, queue, &mut enc, target, &visible);
+        let drawn = canvas.draw(device, queue, &mut enc, target, &visible, size);
         queue.submit(std::iter::once(enc.finish()));
 
         let st = canvas.atlas().stats();
@@ -399,6 +483,39 @@ impl AppState {
             degraded: canvas.last_frame_degraded,
             uploads: st.uploads_this_frame,
             evictions: st.evictions_total,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The seeding multiply overflowed for every seed above 1, which panicked in
+    /// debug and silently wrapped in release, so the same seed drew a different
+    /// image in the two profiles.
+    #[test]
+    fn texture_seeds_do_not_overflow_and_differ() {
+        let first = make_texture(1);
+        let second = make_texture(2);
+        assert_eq!(
+            first.levels[0],
+            make_texture(1).levels[0],
+            "same seed, same image"
+        );
+        assert_ne!(first.levels[0], second.levels[0], "different seeds differ");
+    }
+
+    /// Every level of a generated pyramid is half the one above it, which is what
+    /// makes the LOD path worth measuring.
+    #[test]
+    fn mip_levels_halve() {
+        for level in &make_texture(7).levels {
+            assert!(level.len() % 4 == 0 && !level.is_empty());
+        }
+        let t = make_texture(7);
+        for pair in t.levels.windows(2) {
+            assert_eq!(pair[1].len() * 4, pair[0].len());
         }
     }
 }

@@ -10,4 +10,9 @@ publish.workspace = true
 canvas-core.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
+
+# Only `headless_device` blocks on a future, and that function is native-only.
+# Leaving pollster in the web graph would put a thread-parking executor in the
+# bundle for a code path that cannot run there.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster.workspace = true

@@ -1,0 +1,14 @@
+# Declares the cross-compilation target the web tier needs, so `rustup` installs
+# it on the machine that needs it instead of leaving it to be discovered.
+#
+# The target's std is a separate rustup component, and the failure when it is
+# missing is `can't find crate for core` on a target nobody asked about in that
+# command. `rustup target list --installed` can even list it while the target
+# lib directory is empty, so the check that looks reassuring is not the one
+# that matters. Declaring it here is the fix that travels.
+#
+# No `channel` on purpose. `rust-version` in the workspace manifest is the
+# floor, and pinning a toolchain here would silently move every build on the
+# machine off whatever it currently uses.
+[toolchain]
+targets = ["wasm32-unknown-unknown"]
