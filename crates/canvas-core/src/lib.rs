@@ -236,6 +236,13 @@ impl CameraControl {
 }
 
 /// One reference on the canvas, in world units.
+///
+/// The v1 item model puts four more primitives beside image — text, video,
+/// swatch and stroke — behind an `ItemKind` union, leaving this struct as the
+/// shared geometry they all need. Decided in SQU-63. The spike only ever
+/// needed images, so `tex` is the whole payload and there is no variant to
+/// switch on yet; the culling, LOD and atlas code that reads this struct is
+/// already the shape the union needs, because it never asks what a thing is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Item {
     pub id: u32,
