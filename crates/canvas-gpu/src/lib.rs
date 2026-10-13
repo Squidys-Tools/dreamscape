@@ -20,7 +20,7 @@
 //! eviction and upload behaviour under pan and zoom is identical either way,
 //! and that is what this crate is here to measure.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
@@ -615,6 +615,25 @@ struct TextKey {
 
 const SHAPED_BUFFER_CACHE_LIMIT: usize = 4_096;
 
+fn prune_shaped_buffers<T>(
+    buffers: &mut HashMap<TextKey, T>,
+    order: &mut VecDeque<TextKey>,
+    frame_keys: &HashSet<TextKey>,
+) {
+    let mut candidates = order.len();
+    while buffers.len() > SHAPED_BUFFER_CACHE_LIMIT && candidates > 0 {
+        let Some(key) = order.pop_front() else {
+            break;
+        };
+        candidates -= 1;
+        if frame_keys.contains(&key) {
+            order.push_back(key);
+        } else {
+            buffers.remove(&key);
+        }
+    }
+}
+
 impl TextKey {
     fn for_item(item: &VisibleItem) -> Option<Self> {
         let VisibleKind::Text {
@@ -662,6 +681,10 @@ impl TextLayer {
         }
     }
 
+    fn prune_buffers(&mut self, frame_keys: &HashSet<TextKey>) {
+        prune_shaped_buffers(&mut self.buffers, &mut self.buffer_order, frame_keys);
+    }
+
     fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -675,6 +698,7 @@ impl TextLayer {
             height: size.y.max(1.0) as u32,
         };
         self.viewport.update(queue, resolution);
+        let frame_keys: HashSet<_> = items.iter().filter_map(TextKey::for_item).collect();
 
         for item in items {
             let Some(key) = TextKey::for_item(item) else {
@@ -699,11 +723,6 @@ impl TextLayer {
                 &Attrs::new().family(Family::Name("Lato")),
                 Shaping::Advanced,
             );
-            if self.buffers.len() == SHAPED_BUFFER_CACHE_LIMIT {
-                if let Some(expired) = self.buffer_order.pop_front() {
-                    self.buffers.remove(&expired);
-                }
-            }
             self.buffer_order.push_back(key.clone());
             self.buffers.insert(key, buffer);
         }
@@ -743,6 +762,10 @@ impl TextLayer {
                 &mut self.swash_cache,
             )
             .expect("text preparation failed");
+
+        // The frame's buffers stay live through prepare. If its working set is
+        // larger than the cache budget, discard older off-frame shapes first.
+        self.prune_buffers(&frame_keys);
     }
 
     fn render<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
@@ -1003,6 +1026,8 @@ impl GpuCanvas {
                 .text
                 .get_or_insert_with(|| TextLayer::new(device, queue, self.format));
             text.prepare(device, queue, visible, frame_view.size, frame_view.scale);
+        } else if let Some(text) = &mut self.text {
+            text.prune_buffers(&HashSet::new());
         }
 
         let mut batch: Vec<Instance> = Vec::with_capacity(visible.len());
@@ -1191,6 +1216,28 @@ mod tests {
             *font_size += 1.0;
         }
         assert_ne!(TextKey::for_item(&item), TextKey::for_item(&restyled));
+    }
+
+    #[test]
+    fn shaped_buffer_pruning_keeps_current_frame_keys() {
+        let mut buffers = HashMap::new();
+        let mut order = VecDeque::new();
+        for i in 0..=SHAPED_BUFFER_CACHE_LIMIT {
+            let key = TextKey {
+                content: format!("{i}").into(),
+                width: 100,
+                height: 20,
+                font_size: 16,
+            };
+            order.push_back(key.clone());
+            buffers.insert(key, i);
+        }
+        let current_frame = order.iter().skip(1).cloned().collect();
+
+        prune_shaped_buffers(&mut buffers, &mut order, &current_frame);
+
+        assert_eq!(buffers.len(), SHAPED_BUFFER_CACHE_LIMIT);
+        assert!(current_frame.iter().all(|key| buffers.contains_key(key)));
     }
 
     #[test]

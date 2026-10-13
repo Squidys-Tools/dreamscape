@@ -420,12 +420,14 @@ the thumbnail batch as an overlay in the same render pass. Its mask and color
 glyph atlases are separate from the fixed-slot image atlas, so glyph residency
 cannot evict a thumbnail or affect image degradation.
 
-Shaped buffers are cached by content, world-space box and font size, with a
-4,096-entry FIFO limit. A key change or eviction triggers reshaping; camera zoom
-does not invalidate shaping, and `glyphon` rasterizes and caches the new
+Shaped buffers are cached by content, world-space box and font size, targeting a
+4,096-entry FIFO limit. Buffers needed by the current frame stay pinned, so a
+larger visible working set can temporarily exceed that target; older off-frame
+shapes are evicted first. A key change or eviction triggers reshaping; camera
+zoom does not invalidate shaping, and `glyphon` rasterizes and caches the new
 screen-size glyphs in its own atlas. Pan only changes placement. This keeps the
-CPU shaping work out of the common pan path and makes zoom's raster cost explicit
-without retaining every label ever seen on an infinite board.
+CPU shaping work out of the common pan path without retaining every label ever
+seen on an infinite board.
 
 The browser gets a bundled subset of Lato under the accompanying OFL license:
 Basic Latin, Latin-1, and common punctuation. That is a reproducible font source,
@@ -435,9 +437,10 @@ published releases around it target wgpu 25 and 28.
 
 Adding text leaves `peak_visible` counting every visible item. The placeholder
 and degradation percentages still use image-frames only, and `text_item_frames`
-in the `RESULT` line reports the drawn text workload. Both runners parse the
-field strictly, and `-Scenario text` isolates 500 text items from images. On a
-GPU-equipped host, the pixel check is `cargo test -p canvas-gpu
+in the `RESULT` line reports the drawn text workload. The native runner rejects
+missing result fields; the browser runner captures the same line. Both add
+`-Scenario text` to isolate 500 text items from images. On a GPU-equipped host,
+the pixel check is `cargo test -p canvas-gpu
 text_rendering_changes_readback_pixels -- --ignored`; the browser's
 `verify_pixels` also rejects an image-free text scene with no bright pixels.
 

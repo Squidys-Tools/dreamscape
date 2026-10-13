@@ -152,7 +152,7 @@ Full reasoning, and the findings that shaped it, in `docs/spikes/canvas-spike.md
 ## Where code lives
 
 - `crates/canvas-core` is the item model, viewport, spatial hash, culling, LOD and the camera maths pan and zoom need. No GPU, no platform dependencies, 14 unit tests. Most of the correctness risk lives here.
-- `crates/canvas-gpu` is the wgpu renderer: fixed-slot image atlas, lazy per-level allocation, eviction, one instanced image draw and a separate glyphon text atlas/pass.
+- `crates/canvas-gpu` is the wgpu renderer: fixed-slot image atlas, lazy per-level allocation, eviction, one instanced image draw and a separate glyphon text atlas/overlay.
 - `crates/canvas-app` is the scene, camera, selection, search, text items and the per-frame pipeline. Every consumer links this, so the only thing that differs between them is how the chrome is drawn.
 - `crates/canvas-harness` is the headless driver over `canvas-app` plus frame metrics. Images are generated; the shared renderer bundles a subset font for text.
 - `crates/canvas-wasm` is the browser host, and the only crate that may depend on `wasm-bindgen`. It is thin on purpose: it owns a GPU context, a clock and the compositor, and nothing else. `web/` is the page, the local server and the capture endpoint; `pkg/` is generated.
