@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::ops::{Add, Sub};
+use std::sync::Arc;
 
 /// Base edge length in texels for a generated thumbnail pyramid.
 pub const BASE_MIP: u32 = 256;
@@ -237,21 +238,27 @@ impl CameraControl {
 
 /// One reference on the canvas, in world units.
 ///
-/// The v1 item model puts four more primitives beside image — text, video,
-/// swatch and stroke — behind an `ItemKind` union, leaving this struct as the
-/// shared geometry they all need. Decided in SQU-63. The spike only ever
-/// needed images, so `tex` is the whole payload and there is no variant to
-/// switch on yet; the culling, LOD and atlas code that reads this struct is
-/// already the shape the union needs, because it never asks what a thing is.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// The payload distinguishes media from its shared world-space geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ItemKind {
+    Image {
+        texture: u32,
+    },
+    Text {
+        content: Arc<str>,
+        font_size: f32,
+        color: [u8; 4],
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub id: u32,
     /// World position of the top-left corner.
     pub pos: Vec2,
     /// World size.
     pub size: Vec2,
-    /// Atlas texture key, shared by items that came from the same source image.
-    pub tex: u32,
+    pub kind: ItemKind,
     pub z: i32,
 }
 
@@ -264,18 +271,31 @@ impl Item {
     }
 }
 
-/// An item that survived culling, resolved to device pixels and a mip level.
-#[derive(Clone, Copy, Debug)]
+/// An item that survived culling, resolved to device pixels and image LOD.
+#[derive(Clone, Debug)]
 pub struct VisibleItem {
     pub id: u32,
-    pub tex: u32,
     pub z: i32,
     /// Top-left in device pixels, relative to the canvas viewport origin.
     pub screen_pos: Vec2,
     /// Size in device pixels.
     pub screen_size: Vec2,
-    /// Which level of the thumbnail pyramid to sample.
-    pub mip: u32,
+    /// Size in world units, stable while the camera zooms.
+    pub world_size: Vec2,
+    pub kind: VisibleKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum VisibleKind {
+    Image {
+        texture: u32,
+        mip: u32,
+    },
+    Text {
+        content: Arc<str>,
+        font_size: f32,
+        color: [u8; 4],
+    },
 }
 
 /// Pick the coarsest mip that still resolves to roughly 1:1 in device pixels.
@@ -335,21 +355,23 @@ impl SpatialGrid {
     }
 
     pub fn insert(&mut self, item: Item) {
-        let slot = match self.slot_of.get(&item.id) {
-            Some(&slot) => slot,
-            None => {
-                let slot = self.items.len();
-                self.items.push(item);
-                self.slot_of.insert(item.id, slot);
-                self.seen.push(0);
-                slot
+        let id = item.id;
+        if let Some(&slot) = self.slot_of.get(&id) {
+            if self.items[slot] != item {
+                self.unindex_slot(slot);
+                self.items[slot] = item;
             }
-        };
-        // Remove the item's previous cell membership before re-inserting.
-        if self.items[slot] != item {
-            self.unindex_slot(slot);
-            self.items[slot] = item;
+            self.index_slot(slot);
+        } else {
+            let slot = self.items.len();
+            self.slot_of.insert(id, slot);
+            self.items.push(item);
+            self.seen.push(0);
+            self.index_slot(slot);
         }
+    }
+
+    fn index_slot(&mut self, slot: usize) {
         let r = self.items[slot].bounds();
         let (x0, y0) = self.cell_of(r.min);
         let (x1, y1) = self.cell_of(r.max);
@@ -433,13 +455,28 @@ pub fn cull(
     for item in grid.query(&world_rect) {
         let top_left = viewport.world_to_screen(item.pos, size);
         let screen_size = Vec2::new(item.size.x * viewport.scale, item.size.y * viewport.scale);
+        let kind = match &item.kind {
+            ItemKind::Image { texture } => VisibleKind::Image {
+                texture: *texture,
+                mip: mip_for_screen_size(screen_size.x.max(screen_size.y)),
+            },
+            ItemKind::Text {
+                content,
+                font_size,
+                color,
+            } => VisibleKind::Text {
+                content: Arc::clone(content),
+                font_size: *font_size,
+                color: *color,
+            },
+        };
         out.push(VisibleItem {
             id: item.id,
-            tex: item.tex,
             z: item.z,
             screen_pos: top_left,
             screen_size,
-            mip: mip_for_screen_size(screen_size.x.max(screen_size.y)),
+            world_size: item.size,
+            kind,
         });
     }
     out.sort_unstable_by_key(|v| (v.z, v.id));
@@ -455,7 +492,7 @@ mod tests {
             id,
             pos: Vec2::new(x, y),
             size: Vec2::new(100.0, 100.0),
-            tex: id % 8,
+            kind: ItemKind::Image { texture: id % 8 },
             z: 0,
         }
     }
@@ -496,7 +533,7 @@ mod tests {
                 id: i,
                 pos: Vec2::new(i as f32 * 37.0, i as f32 * 11.0),
                 size: Vec2::new(200.0, 150.0),
-                tex: i % 8,
+                kind: ItemKind::Image { texture: i % 8 },
                 z: 0,
             });
         }
@@ -572,7 +609,7 @@ mod tests {
                 id: i,
                 pos: Vec2::new(i as f32 * 120.0, 0.0),
                 size: Vec2::new(100.0, 100.0),
-                tex: i % 8,
+                kind: ItemKind::Image { texture: i % 8 },
                 z: 0,
             });
         }

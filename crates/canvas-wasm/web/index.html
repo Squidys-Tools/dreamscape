@@ -53,6 +53,7 @@
       const scene = {
         items: num("items", 2000),
         textures: num("textures", 2000),
+        text_items: num("text_items", 0),
         atlas: num("atlas", 2048),
         extent: num("extent", 1000),
         pan: num("pan", 18),
@@ -114,6 +115,7 @@
             board,
             scene.items,
             scene.textures,
+            scene.text_items,
             scene.atlas,
             scene.extent,
             scene.pan,
@@ -155,7 +157,8 @@
           show(
             `<b>${result}</b>\n${after}\nadapter  ${host.adapter()}\n` +
               `size     ${host.size()}\nbackend  ${backend}\n` +
-              `scene    ${scene.items} items, ${scene.textures} distinct, ` +
+              `scene    ${scene.items} images, ${scene.textures} distinct, ` +
+              `${scene.text_items} text items, ` +
               `extent ${scene.extent}, pan ${scene.pan}, zoom ${scene.zoom}\n` +
               `<pre style="margin:8px 0 0">${host.verify_map()}</pre>`,
           );

@@ -87,7 +87,7 @@ pub fn report(m: &Metrics, adapter: &wgpu::AdapterInfo, budget_ms: f64) -> Strin
     let (mean, p50, p99, max, over) = m.percentiles(budget_ms);
     let ph = m.total_placeholder();
     let deg = m.total_degraded();
-    let vis = m.total_visible();
+    let vis = m.total_visible_images();
     let mut out = String::new();
     out.push_str(&format!(
         "adapter           {} / {:?}\n",
@@ -99,12 +99,13 @@ pub fn report(m: &Metrics, adapter: &wgpu::AdapterInfo, budget_ms: f64) -> Strin
     ));
     out.push_str(&format!("over budget       {over:>5} / {}\n", m.len()));
     out.push_str(&format!("peak visible      {}\n", m.peak_visible));
+    out.push_str(&format!("text item-frames  {}\n", m.total_text_items()));
     out.push_str(&format!(
-        "placeholder       {ph} of {vis} item-frames ({:.2}%)\n",
+        "placeholder       {ph} of {vis} image-frames ({:.2}%)\n",
         100.0 * ph as f64 / vis.max(1) as f64
     ));
     out.push_str(&format!(
-        "degraded          {deg} of {vis} item-frames ({:.2}%)\n",
+        "degraded          {deg} of {vis} image-frames ({:.2}%)\n",
         100.0 * deg as f64 / vis.max(1) as f64
     ));
     out

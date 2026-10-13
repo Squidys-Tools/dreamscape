@@ -26,7 +26,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use canvas_core::{CameraControl, Item, PointerEvent, SpatialGrid, Vec2, Viewport, WheelEvent};
+use canvas_core::{
+    CameraControl, Item, ItemKind, PointerEvent, SpatialGrid, Vec2, Viewport, WheelEvent,
+};
 use canvas_gpu::GpuCanvas;
 
 /// A reproducible little PRNG, so a run is repeatable without a dependency.
@@ -156,6 +158,8 @@ impl Default for Motion {
 pub struct Config {
     pub items: u32,
     pub textures: u32,
+    /// Number of text items added to the generated scene.
+    pub text_items: u32,
     pub atlas: canvas_gpu::AtlasConfig,
     /// Half-extent of the world area items are scattered across, in world units.
     ///
@@ -181,6 +185,7 @@ impl Default for Config {
         Self {
             items: 2_000,
             textures: 2_000,
+            text_items: 0,
             atlas: canvas_gpu::AtlasConfig::default(),
             extent: 1_000.0,
             seed: 0x5EED,
@@ -199,13 +204,17 @@ impl Default for Config {
 /// is also the only place that knows what a frame is on its platform.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameStats {
-    /// Visible items surviving culling.
+    /// All visible items surviving culling.
     pub visible: u32,
+    /// Visible images, used as the placeholder and degradation denominator.
+    pub visible_images: u32,
     /// Items actually drawn.
     pub drawn: u32,
-    /// Items drawn as a placeholder because no level could be placed.
+    /// Text items drawn in the overlay pass.
+    pub text_items: u32,
+    /// Images drawn as a placeholder because no atlas level could be placed.
     pub placeholder: u32,
-    /// Items drawn at a mip level coarser than their screen size asked for.
+    /// Images drawn at a mip level coarser than their screen size asked for.
     ///
     /// Not a failure, unlike `placeholder`. The atlas is partitioned by level,
     /// so a dense board of distinct images saturates the fine levels and falls
@@ -294,6 +303,14 @@ impl Metrics {
         self.samples.iter().map(|s| s.stats.visible).sum()
     }
 
+    pub fn total_visible_images(&self) -> u32 {
+        self.samples.iter().map(|s| s.stats.visible_images).sum()
+    }
+
+    pub fn total_text_items(&self) -> u32 {
+        self.samples.iter().map(|s| s.stats.text_items).sum()
+    }
+
     pub fn total_degraded(&self) -> u32 {
         self.samples.iter().map(|s| s.stats.degraded).sum()
     }
@@ -309,14 +326,15 @@ impl Metrics {
         let (mean, p50, p99, max, over) = self.percentiles(budget_ms);
         let ph = self.total_placeholder();
         let deg = self.total_degraded();
-        let vis = self.total_visible();
+        let vis = self.total_visible_images();
         format!(
             "RESULT frames={} mean_ms={mean:.3} p50_ms={p50:.3} p99_ms={p99:.3} \
-             max_ms={max:.3} over={over} placeholders_pct={:.2} degraded_pct={:.2} peak_visible={}",
+             max_ms={max:.3} over={over} placeholders_pct={:.2} degraded_pct={:.2} peak_visible={} text_item_frames={}",
             self.len(),
             100.0 * ph as f64 / vis.max(1) as f64,
             100.0 * deg as f64 / vis.max(1) as f64,
-            self.peak_visible
+            self.peak_visible,
+            self.total_text_items()
         )
     }
 }
@@ -356,8 +374,32 @@ impl AppState {
                 id: i,
                 pos: Vec2::new(cx + rng.range(-900.0, 900.0), cy + rng.range(-900.0, 900.0)),
                 size: Vec2::new(size, size * rng.range(0.7, 1.4)),
-                tex: i % cfg.textures.max(1),
+                kind: ItemKind::Image {
+                    texture: i % cfg.textures.max(1),
+                },
                 z: (i % 7) as i32,
+            });
+        }
+
+        let mut text_rng = Rng::new(cfg.seed ^ 0x5445_5854);
+        let text_clusters = ((cfg.text_items / 50).max(1)) as usize;
+        for i in 0..cfg.text_items {
+            let cluster = (i as usize) % text_clusters;
+            let cx = (cluster as f32 / text_clusters as f32 - 0.5) * 2.0 * cfg.extent;
+            let cy = (((cluster as f32) * 0.618034) % 1.0 - 0.5) * 2.0 * cfg.extent;
+            grid.insert(Item {
+                id: cfg.items + i,
+                pos: Vec2::new(
+                    cx + text_rng.range(-900.0, 900.0),
+                    cy + text_rng.range(-900.0, 900.0),
+                ),
+                size: Vec2::new(420.0, 80.0),
+                kind: ItemKind::Text {
+                    content: format!("Reference {:02}", i % 32).into(),
+                    font_size: 48.0,
+                    color: [255, 255, 255, 255],
+                },
+                z: i32::MAX,
             });
         }
 
@@ -456,7 +498,13 @@ impl AppState {
         // Request a level only when the texture has no usable one yet. Re-requesting
         // a level that can never be placed re-uploads it every frame, which costs far
         // more than the upload itself.
-        let mut wanted: Vec<(u32, u32)> = visible.iter().map(|v| (v.tex, v.mip)).collect();
+        let mut wanted: Vec<(u32, u32)> = visible
+            .iter()
+            .filter_map(|v| match &v.kind {
+                canvas_core::VisibleKind::Image { texture, mip } => Some((*texture, *mip)),
+                canvas_core::VisibleKind::Text { .. } => None,
+            })
+            .collect();
         wanted.sort_unstable();
         wanted.dedup();
         for (key, level) in wanted {
@@ -472,13 +520,29 @@ impl AppState {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("app-frame"),
         });
-        let drawn = canvas.draw(device, queue, &mut enc, target, &visible, size);
+        let image_visible = visible
+            .iter()
+            .filter(|v| matches!(&v.kind, canvas_core::VisibleKind::Image { .. }))
+            .count() as u32;
+        let drawn = canvas.draw(
+            device,
+            queue,
+            &mut enc,
+            target,
+            &visible,
+            canvas_gpu::FrameView {
+                size,
+                scale: self.viewport.scale,
+            },
+        );
         queue.submit(std::iter::once(enc.finish()));
 
         let st = canvas.atlas().stats();
         FrameStats {
             visible: visible.len() as u32,
-            drawn,
+            visible_images: image_visible,
+            drawn: drawn.images + drawn.text_items,
+            text_items: drawn.text_items,
             placeholder: canvas.last_frame_dropped,
             degraded: canvas.last_frame_degraded,
             uploads: st.uploads_this_frame,
@@ -490,6 +554,30 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_items_are_culled_with_shared_geometry() {
+        let mut app = AppState::new(Config {
+            items: 1,
+            text_items: 1,
+            extent: 0.0,
+            ..Default::default()
+        });
+        let visible = canvas_core::cull(
+            &mut app.grid,
+            &Viewport::default(),
+            Vec2::new(4_000.0, 2_000.0),
+            0.0,
+        );
+
+        assert_eq!(visible.len(), 2);
+        assert!(visible
+            .iter()
+            .any(|item| matches!(&item.kind, canvas_core::VisibleKind::Text { .. })));
+        assert!(visible
+            .iter()
+            .any(|item| matches!(&item.kind, canvas_core::VisibleKind::Image { .. })));
+    }
 
     /// The seeding multiply overflowed for every seed above 1, which panicked in
     /// debug and silently wrapped in release, so the same seed drew a different
@@ -504,6 +592,27 @@ mod tests {
             "same seed, same image"
         );
         assert_ne!(first.levels[0], second.levels[0], "different seeds differ");
+    }
+
+    #[test]
+    fn text_draws_do_not_dilute_image_atlas_percentages() {
+        let mut metrics = Metrics::default();
+        metrics.push(
+            Duration::from_millis(1),
+            FrameStats {
+                visible: 3,
+                visible_images: 1,
+                drawn: 3,
+                text_items: 2,
+                placeholder: 1,
+                ..Default::default()
+            },
+        );
+
+        let line = metrics.result_line(BUDGET_MS);
+        assert!(line.contains("placeholders_pct=100.00"));
+        assert!(line.contains("peak_visible=3"));
+        assert!(line.contains("text_item_frames=2"));
     }
 
     /// Every level of a generated pyramid is half the one above it, which is what

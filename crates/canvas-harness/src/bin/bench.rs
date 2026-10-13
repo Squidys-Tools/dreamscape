@@ -24,6 +24,7 @@ fn main() {
         app: Config {
             items: arg("items", "2000").parse().unwrap(),
             textures: arg("textures", "2000").parse().unwrap(),
+            text_items: arg("text-items", "0").parse().unwrap(),
             atlas: AtlasConfig {
                 size: arg("atlas", "2048").parse().unwrap(),
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -45,8 +46,13 @@ fn main() {
 
     println!("dreamscape canvas spike - headless");
     println!(
-        "  scene      {} items, {} distinct images, {}x{}, atlas {}",
-        cfg.app.items, cfg.app.textures, cfg.width, cfg.height, cfg.app.atlas.size
+        "  scene      {} items, {} distinct images, {} text items, {}x{}, atlas {}",
+        cfg.app.items,
+        cfg.app.textures,
+        cfg.app.text_items,
+        cfg.width,
+        cfg.height,
+        cfg.app.atlas.size
     );
 
     let r = run(&cfg);

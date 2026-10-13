@@ -2,10 +2,9 @@
 //!
 //! Design notes that matter for the numbers this is meant to produce:
 //!
-//! * **One draw call.** Every visible item is an instance of a single quad. Two
-//!   thousand items is one `draw(0..6, 0..n)` with no batching logic at all.
-//!   If this is not fast, the problem is fill rate or texture sampling, never
-//!   draw-call overhead.
+//! * **One image draw call.** Every image is an instance of a single quad. Two
+//!   thousand images is one `draw(0..6, 0..n)`; text is a separate overlay in the
+//!   same render pass, with its own atlas.
 //!
 //! * **Mips are uploaded as separate sub-rectangles**, one slot grid per level.
 //!   The GPU's own mip selection is therefore disabled and sampling is explicit,
@@ -21,10 +20,15 @@
 //! eviction and upload behaviour under pan and zoom is identical either way,
 //! and that is what this crate is here to measure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::num::{NonZeroU32, NonZeroU64};
+use std::sync::Arc;
 
-use canvas_core::{Vec2, VisibleItem, MIP_LEVELS};
+use canvas_core::{Vec2, VisibleItem, VisibleKind, MIP_LEVELS};
+use glyphon::{
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
 
 /// Mip level `i` of a pyramid generated at [`canvas_core::BASE_MIP`].
 pub fn mip_size(level: u32) -> u32 {
@@ -601,9 +605,169 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TextKey {
+    content: Arc<str>,
+    width: u32,
+    height: u32,
+    font_size: u32,
+}
+
+const SHAPED_BUFFER_CACHE_LIMIT: usize = 4_096;
+
+impl TextKey {
+    fn for_item(item: &VisibleItem) -> Option<Self> {
+        let VisibleKind::Text {
+            content, font_size, ..
+        } = &item.kind
+        else {
+            return None;
+        };
+        // Zoom changes glyph raster size, not the shaped run or its world layout.
+        Some(Self {
+            content: Arc::clone(content),
+            width: item.world_size.x.to_bits(),
+            height: item.world_size.y.to_bits(),
+            font_size: font_size.to_bits(),
+        })
+    }
+}
+
+struct TextLayer {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    renderer: TextRenderer,
+    buffers: HashMap<TextKey, Buffer>,
+    buffer_order: VecDeque<TextKey>,
+}
+
+impl TextLayer {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let cache = Cache::new(device);
+        let mut atlas = TextAtlas::new(device, queue, &cache, format);
+        let renderer = TextRenderer::new(&mut atlas, device, Default::default(), None);
+        let font_system = FontSystem::new_with_fonts([glyphon::fontdb::Source::Binary(Arc::new(
+            include_bytes!("../assets/lato-latin.ttf").to_vec(),
+        ))]);
+        Self {
+            font_system,
+            swash_cache: SwashCache::new(),
+            viewport: Viewport::new(device, &cache),
+            atlas,
+            renderer,
+            buffers: HashMap::new(),
+            buffer_order: VecDeque::new(),
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        items: &[VisibleItem],
+        size: Vec2,
+        scale: f32,
+    ) {
+        let resolution = Resolution {
+            width: size.x.max(1.0) as u32,
+            height: size.y.max(1.0) as u32,
+        };
+        self.viewport.update(queue, resolution);
+
+        for item in items {
+            let Some(key) = TextKey::for_item(item) else {
+                continue;
+            };
+            if self.buffers.contains_key(&key) {
+                continue;
+            }
+            let font_size = f32::from_bits(key.font_size);
+            let mut buffer = Buffer::new(
+                &mut self.font_system,
+                Metrics::new(font_size, font_size * 1.25),
+            );
+            buffer.set_size(
+                &mut self.font_system,
+                Some(f32::from_bits(key.width)),
+                Some(f32::from_bits(key.height)),
+            );
+            buffer.set_text(
+                &mut self.font_system,
+                &key.content,
+                &Attrs::new().family(Family::Name("Lato")),
+                Shaping::Advanced,
+            );
+            if self.buffers.len() == SHAPED_BUFFER_CACHE_LIMIT {
+                if let Some(expired) = self.buffer_order.pop_front() {
+                    self.buffers.remove(&expired);
+                }
+            }
+            self.buffer_order.push_back(key.clone());
+            self.buffers.insert(key, buffer);
+        }
+
+        let areas: Vec<_> = items
+            .iter()
+            .filter_map(|item| {
+                let VisibleKind::Text { color, .. } = &item.kind else {
+                    return None;
+                };
+                let buffer = self.buffers.get(&TextKey::for_item(item)?)?;
+                Some(TextArea {
+                    buffer,
+                    left: item.screen_pos.x,
+                    top: item.screen_pos.y,
+                    scale,
+                    bounds: TextBounds {
+                        left: item.screen_pos.x.floor() as i32,
+                        top: item.screen_pos.y.floor() as i32,
+                        right: (item.screen_pos.x + item.screen_size.x).ceil() as i32,
+                        bottom: (item.screen_pos.y + item.screen_size.y).ceil() as i32,
+                    },
+                    default_color: Color::rgba(color[0], color[1], color[2], color[3]),
+                    custom_glyphs: &[],
+                })
+            })
+            .collect();
+
+        self.renderer
+            .prepare(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                areas,
+                &mut self.swash_cache,
+            )
+            .expect("text preparation failed");
+    }
+
+    fn render<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
+        self.renderer
+            .render(&self.atlas, &self.viewport, pass)
+            .expect("text rendering failed");
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DrawStats {
+    pub images: u32,
+    pub text_items: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FrameView {
+    pub size: Vec2,
+    pub scale: f32,
+}
+
 /// The renderer: owns the atlas, the pipeline and the instance buffer.
 pub struct GpuCanvas {
     atlas: Atlas,
+    format: wgpu::TextureFormat,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     instances: wgpu::Buffer,
@@ -624,6 +788,7 @@ pub struct GpuCanvas {
     /// a placeholder count of zero says only that nothing failed, and this is the
     /// number that says whether the board is actually sharp.
     pub last_frame_degraded: u32,
+    text: Option<TextLayer>,
 }
 
 impl GpuCanvas {
@@ -769,6 +934,7 @@ impl GpuCanvas {
 
         Self {
             atlas,
+            format,
             pipeline,
             bind_group,
             instances,
@@ -777,6 +943,7 @@ impl GpuCanvas {
             background: [0.09, 0.09, 0.10, 1.0],
             last_frame_dropped: 0,
             last_frame_degraded: 0,
+            text: None,
         }
     }
 
@@ -794,7 +961,13 @@ impl GpuCanvas {
 
     /// Distinct texture keys among the visible set, sorted and deduplicated.
     pub fn visible_keys(visible: &[VisibleItem]) -> Vec<u32> {
-        let mut keys: Vec<u32> = visible.iter().map(|v| v.tex).collect();
+        let mut keys: Vec<u32> = visible
+            .iter()
+            .filter_map(|item| match &item.kind {
+                VisibleKind::Image { texture, .. } => Some(*texture),
+                VisibleKind::Text { .. } => None,
+            })
+            .collect();
         keys.sort_unstable();
         keys.dedup();
         keys
@@ -805,13 +978,13 @@ impl GpuCanvas {
         Self::visible_keys(visible)
     }
 
-    /// Build instances and issue a single instanced draw.
+    /// Build image instances and composite cached text over them.
     ///
-    /// `size` is the render target in device pixels, and it feeds the projection
-    /// uniform rather than being baked into the instances.
+    /// The frame's pixel size feeds projection, while its scale controls glyph
+    /// rasterization without invalidating shaped buffers.
     ///
-    /// Returns the number actually drawn, which may be fewer than
-    /// `visible.len()` if the atlas could not free space in time.
+    /// Image and text residency are separate so adding labels cannot evict a
+    /// thumbnail or change its degradation count.
     pub fn draw(
         &mut self,
         device: &wgpu::Device,
@@ -819,20 +992,34 @@ impl GpuCanvas {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         visible: &[VisibleItem],
-        size: Vec2,
-    ) -> u32 {
+        frame_view: FrameView,
+    ) -> DrawStats {
+        let text_items = visible
+            .iter()
+            .filter(|item| matches!(&item.kind, VisibleKind::Text { .. }))
+            .count() as u32;
+        if text_items > 0 {
+            let text = self
+                .text
+                .get_or_insert_with(|| TextLayer::new(device, queue, self.format));
+            text.prepare(device, queue, visible, frame_view.size, frame_view.scale);
+        }
+
         let mut batch: Vec<Instance> = Vec::with_capacity(visible.len());
         let mut dropped = 0u32;
         let mut degraded = 0u32;
         let placeholder = self.atlas.placeholder_uv();
         for v in visible {
-            let uv = match self.atlas.uv_rect(v.tex, v.mip) {
+            let VisibleKind::Image { texture, mip } = &v.kind else {
+                continue;
+            };
+            let uv = match self.atlas.uv_rect(*texture, *mip) {
                 Some((used, uv)) => {
                     // A coarser level than LOD asked for. Counted here, beside the
                     // loop that chose it, because the fallback is silent: the item
                     // draws correctly and no other metric in the pipeline can see
                     // that it is blurrier than the screen size warranted.
-                    if used > v.mip {
+                    if used > *mip {
                         degraded += 1;
                     }
                     uv
@@ -859,56 +1046,58 @@ impl GpuCanvas {
                 break;
             }
         }
-        if batch.is_empty() {
-            self.last_frame_dropped = dropped;
-            self.last_frame_degraded = degraded;
-            return 0;
+        if !batch.is_empty() {
+            queue.write_buffer(
+                &self.instances,
+                0,
+                bytemuck::cast_slice(&batch[..batch.len().min(self.instance_capacity as usize)]),
+            );
         }
-
-        queue.write_buffer(
-            &self.instances,
-            0,
-            bytemuck::cast_slice(&batch[..batch.len().min(self.instance_capacity as usize)]),
-        );
         // The one value that makes a pixel-space rect mean anything in clip
         // space. Clamped to at least one pixel so a zero-sized target cannot
         // produce a NaN that quietly blanks every subsequent frame.
         queue.write_buffer(
             &self.viewport,
             0,
-            bytemuck::cast_slice(&[size.x.max(1.0), size.y.max(1.0)]),
+            bytemuck::cast_slice(&[frame_view.size.x.max(1.0), frame_view.size.y.max(1.0)]),
         );
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("canvas-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.background[0] as f64,
-                            g: self.background[1] as f64,
-                            b: self.background[2] as f64,
-                            a: self.background[3] as f64,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("canvas-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: self.background[0] as f64,
+                        g: self.background[1] as f64,
+                        b: self.background[2] as f64,
+                        a: self.background[3] as f64,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        if !batch.is_empty() {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, self.instances.slice(..));
             pass.draw(0..6, 0..batch.len() as u32);
         }
-        let _ = device;
+        if text_items > 0 {
+            self.text.as_ref().unwrap().render(&mut pass);
+        }
+        drop(pass);
         self.last_frame_dropped = dropped;
         self.last_frame_degraded = degraded;
-        batch.len() as u32
+        DrawStats {
+            images: batch.len() as u32,
+            text_items,
+        }
     }
 }
 
@@ -955,4 +1144,163 @@ pub fn headless_device() -> (
 /// Screen-space rect a viewport occupies, for hosts that need to size a target.
 pub fn viewport_size(width: f32, height: f32) -> Vec2 {
     Vec2::new(width, height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shaped_text_cache_key_does_not_change_with_camera_zoom() {
+        let item = VisibleItem {
+            id: 1,
+            z: 0,
+            screen_pos: Vec2::new(10.0, 20.0),
+            screen_size: Vec2::new(200.0, 48.0),
+            world_size: Vec2::new(200.0, 48.0),
+            kind: VisibleKind::Text {
+                content: "Reference".into(),
+                font_size: 40.0,
+                color: [255, 255, 255, 255],
+            },
+        };
+        let mut zoomed = item.clone();
+        zoomed.screen_pos = Vec2::new(30.0, 60.0);
+        zoomed.screen_size = Vec2::new(400.0, 96.0);
+
+        assert_eq!(TextKey::for_item(&item), TextKey::for_item(&zoomed));
+
+        let mut recolored = item.clone();
+        if let VisibleKind::Text { color, .. } = &mut recolored.kind {
+            *color = [10, 20, 30, 255];
+        }
+        assert_eq!(TextKey::for_item(&item), TextKey::for_item(&recolored));
+
+        let mut reworded = item.clone();
+        if let VisibleKind::Text { content, .. } = &mut reworded.kind {
+            *content = "Reworded".into();
+        }
+        assert_ne!(TextKey::for_item(&item), TextKey::for_item(&reworded));
+
+        let mut resized = item.clone();
+        resized.world_size.x += 1.0;
+        assert_ne!(TextKey::for_item(&item), TextKey::for_item(&resized));
+
+        let mut restyled = item.clone();
+        if let VisibleKind::Text { font_size, .. } = &mut restyled.kind {
+            *font_size += 1.0;
+        }
+        assert_ne!(TextKey::for_item(&item), TextKey::for_item(&restyled));
+    }
+
+    #[test]
+    fn bundled_font_shapes_latin_text_without_system_fonts() {
+        let mut fonts = glyphon::fontdb::Database::new();
+        fonts.load_font_data(include_bytes!("../assets/lato-latin.ttf").to_vec());
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), fonts);
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(32.0, 40.0));
+        buffer.set_size(&mut font_system, Some(300.0), Some(80.0));
+        buffer.set_text(
+            &mut font_system,
+            "Reference 42",
+            &Attrs::new().family(Family::Name("Lato")),
+            Shaping::Advanced,
+        );
+
+        assert!(buffer.layout_runs().any(|run| !run.glyphs.is_empty()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[ignore = "requires a wgpu adapter; run on a machine with GPU support"]
+    #[test]
+    fn text_rendering_changes_readback_pixels() {
+        let (device, queue, format, _) = headless_device();
+        let mut canvas = GpuCanvas::new(&device, &queue, format, AtlasConfig::default(), 1);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("text-readback-target"),
+            size: wgpu::Extent3d {
+                width: 320,
+                height: 128,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let item = VisibleItem {
+            id: 1,
+            z: 0,
+            screen_pos: Vec2::new(20.0, 18.0),
+            screen_size: Vec2::new(260.0, 88.0),
+            world_size: Vec2::new(260.0, 88.0),
+            kind: VisibleKind::Text {
+                content: "Text pixels".into(),
+                font_size: 40.0,
+                color: [255, 255, 255, 255],
+            },
+        };
+        canvas.begin_frame();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("text-readback-encoder"),
+        });
+        let drawn = canvas.draw(
+            &device,
+            &queue,
+            &mut encoder,
+            &view,
+            &[item],
+            FrameView {
+                size: Vec2::new(320.0, 128.0),
+                scale: 1.0,
+            },
+        );
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("text-readback-buffer"),
+            size: 320 * 128 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(320 * 4),
+                    rows_per_image: Some(128),
+                },
+            },
+            wgpu::Extent3d {
+                width: 320,
+                height: 128,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (send, receive) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = send.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        receive.recv().unwrap().unwrap();
+        let pixels = slice.get_mapped_range();
+        let bright = pixels
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] > 170 && pixel[1] > 170 && pixel[2] > 170)
+            .count();
+
+        assert_eq!(drawn.text_items, 1);
+        assert!(bright > 0, "text pixels were not present in the readback");
+    }
 }

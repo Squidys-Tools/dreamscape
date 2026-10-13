@@ -18,6 +18,7 @@
   quick  2k items, 120 warmup, 200 frames
   bench  (default) 2k / 8k / 20k distinct, the same rows as the native bench
   scale  item counts doubled with everything on screen
+  text   500 text items over an image-free board
 
 .PARAMETER Atlas
   Edge length of the texture atlas. Defaults to 2048, to match the native runs.
@@ -44,7 +45,7 @@
   page does not post a result, so a run meant to capture a number needs this.
 #>
 param(
-  [ValidateSet('quick', 'bench', 'scale')]
+  [ValidateSet('quick', 'bench', 'scale', 'text')]
   [string]$Scenario = 'bench',
 
   [int]$Atlas = 2048,
@@ -145,6 +146,7 @@ try {
     'quick' { @(2000) }
     'bench' { @(2000, 8000, 20000) }
     'scale' { @(2000, 4000, 8000, 16000, 32000) }
+    'text' { @() }
   }
 
   # Every run needs the board full, so the pan is zeroed in `scale` exactly as
@@ -154,12 +156,16 @@ try {
   # `-Scenario quick`, the one-row case, tried to launch a program called "h".
   # The three-row `bench` case happened to work, which is what made this look
   # like a browser problem rather than an array problem.
-  $urls = @(
-    foreach ($n in $rows) {
-      $motion = if ($Scenario -eq 'scale') { 'pan=0&zoom=0.96&frames=150' } else { 'pan=18&zoom=0.7&frames=200' }
-      "$url/web/index.html?$common&items=$n&textures=$n&$motion"
-    }
-  )
+  if ($Scenario -eq 'text') {
+    $urls = @("$url/web/index.html?$common&items=0&textures=0&text_items=500&pan=0&zoom=0.7&frames=200")
+  } else {
+    $urls = @(
+      foreach ($n in $rows) {
+        $motion = if ($Scenario -eq 'scale') { 'pan=0&zoom=0.96&frames=150' } else { 'pan=18&zoom=0.7&frames=200' }
+        "$url/web/index.html?$common&items=$n&textures=$n&$motion"
+      }
+    )
+  }
   $interactive = "$url/web/index.html?atlas=$Atlas&backend=$Backend&width=$Width&height=$Height"
 
   if ($ResultLog) {
