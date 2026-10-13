@@ -5,7 +5,9 @@ import json
 import os
 import platform
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 try:
     import resource
@@ -27,8 +29,8 @@ IMAGE_BATCH = 8
 TEXT_BATCH = 16
 ROOT = Path(os.environ["ABO_SAMPLE_ROOT"])
 MANIFEST = ROOT / "manifest.jsonl"
-OUTPUT = ROOT / "embeddinggemma2-abo-results-2026-10-13.json"
 PROGRESS = Path(os.environ.get("ABO_EMBEDDINGGEMMA_PROGRESS", ROOT / ".embeddinggemma2-progress"))
+RUN_INFO_PATH = PROGRESS / "run.json"
 
 
 def atomic_json(path, value):
@@ -43,6 +45,47 @@ def sha256(path):
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def run_configuration():
+    return {
+        "model": MODEL_ID,
+        "revision": REVISION,
+        "manifest_sha256": sha256(MANIFEST),
+        "image_token_budget": IMAGE_TOKENS,
+        "image_batch_size": IMAGE_BATCH,
+        "text_batch_size": TEXT_BATCH,
+        "search_prefix": SEARCH_PREFIX,
+        "runner_sha256": sha256(Path(__file__)),
+        "runtime": runtime_profile(),
+    }
+
+
+def load_run_info(allow_completed=False):
+    PROGRESS.mkdir(parents=True, exist_ok=True)
+    configuration = run_configuration()
+    if RUN_INFO_PATH.is_file():
+        run_info = json.loads(RUN_INFO_PATH.read_text())
+        if run_info.get("configuration") != configuration:
+            raise RuntimeError(
+                "Progress belongs to a different model, input, runner, or software configuration. "
+                "Use a new ABO_EMBEDDINGGEMMA_PROGRESS directory or rerun the PowerShell wrapper with -NewRun."
+            )
+        if run_info.get("completed_at") and not allow_completed:
+            raise RuntimeError("This run is already complete. Use the PowerShell wrapper with -NewRun to start another run.")
+        return run_info
+    run_info = {
+        "run_id": uuid4().hex,
+        "started_at": utc_now(),
+        "completed_at": None,
+        "configuration": configuration,
+    }
+    atomic_json(RUN_INFO_PATH, run_info)
+    return run_info
 
 
 def memory_total_bytes():
@@ -126,6 +169,41 @@ def peak_rss_kib():
     return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
 
+def native_bf16_supported():
+    cpu_backend = getattr(torch, "cpu", None)
+    bf16_probe = getattr(cpu_backend, "_is_avx512_bf16_supported", None)
+    try:
+        return bool(bf16_probe()) if bf16_probe is not None else False
+    except Exception:
+        return False
+
+
+def runtime_profile():
+    bf16_supported = native_bf16_supported()
+    capability_probe = getattr(torch.backends.cpu, "get_cpu_capability", None)
+    try:
+        cpu_capability = capability_probe() if capability_probe is not None else "unknown"
+    except Exception:
+        cpu_capability = "unknown"
+    return {
+        "platform": platform.platform(),
+        "cpu_model": cpu_model(),
+        "vcpus_visible": os.cpu_count(),
+        "memory_total_bytes": memory_total_bytes(),
+        "device": "CPU",
+        "threads": 1,
+        "dtype": "bfloat16" if bf16_supported else "float32",
+        "cpu_capability": cpu_capability,
+        "bf16_cpu_supported": bf16_supported,
+        "image_token_budget": IMAGE_TOKENS,
+        "python": platform.python_version(),
+        "torch": str(torch.__version__),
+        "transformers": transformers.__version__,
+        "sentence_transformers": sentence_transformers.__version__,
+        "numpy": np.__version__,
+    }
+
+
 def load_products():
     products = [json.loads(line) for line in MANIFEST.read_text(encoding="utf-8").splitlines()]
     if len(products) != 300:
@@ -143,16 +221,20 @@ def image_paths(products, kind):
     ]
 
 
-def get_checkpoint_info():
+def get_checkpoint_info(run_info):
     PROGRESS.mkdir(parents=True, exist_ok=True)
     info_path = PROGRESS / "checkpoint.json"
     if info_path.is_file():
-        return json.loads(info_path.read_text())
+        info = json.loads(info_path.read_text())
+        if info.get("run_id") == run_info["run_id"]:
+            return info
     started = time.perf_counter()
     snapshot = Path(snapshot_download(MODEL_ID, revision=REVISION))
     cache_lookup_seconds = time.perf_counter() - started
     weight_path = snapshot / "model.safetensors"
     info = {
+        "run_id": run_info["run_id"],
+        "recorded_at": utc_now(),
         "model_file": weight_path.name,
         "model_file_bytes": weight_path.stat().st_size,
         "model_file_sha256": sha256(weight_path),
@@ -166,15 +248,8 @@ def get_checkpoint_info():
 def load_model():
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
-    cpu_backend = getattr(torch, "cpu", None)
-    bf16_probe = getattr(cpu_backend, "_is_avx512_bf16_supported", None)
-    try:
-        bf16_supported = bool(bf16_probe()) if bf16_probe is not None else False
-    except Exception:
-        bf16_supported = False
-    dtype = torch.bfloat16 if bf16_supported else torch.float32
-    capability_probe = getattr(torch.backends.cpu, "get_cpu_capability", None)
-    cpu_capability = capability_probe() if capability_probe is not None else "unknown"
+    runtime = runtime_profile()
+    dtype = torch.bfloat16 if runtime["bf16_cpu_supported"] else torch.float32
     started = time.perf_counter()
     model = SentenceTransformer(
         MODEL_ID,
@@ -188,27 +263,10 @@ def load_model():
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     if not 400_000_000 <= parameter_count <= 500_000_000:
         raise RuntimeError(f"Expected the text+vision subset (~440M parameters), got {parameter_count}")
-    runtime = {
-        "platform": platform.platform(),
-        "cpu_model": cpu_model(),
-        "vcpus_visible": os.cpu_count(),
-        "memory_total_bytes": memory_total_bytes(),
-        "device": "CPU",
-        "threads": 1,
-        "dtype": str(dtype).replace("torch.", ""),
-        "cpu_capability": cpu_capability,
-        "bf16_cpu_supported": bf16_supported,
-        "image_token_budget": IMAGE_TOKENS,
-        "python": platform.python_version(),
-        "torch": torch.__version__,
-        "transformers": transformers.__version__,
-        "sentence_transformers": sentence_transformers.__version__,
-        "numpy": np.__version__,
-    }
     return model, parameter_count, load_seconds, runtime
 
 
-def encode_task(model, name, inputs, batch_size, prompt=None, images=False):
+def encode_task(model, name, inputs, batch_size, run_info, prompt=None, images=False):
     task_dir = PROGRESS / name
     task_dir.mkdir(parents=True, exist_ok=True)
     durations = []
@@ -219,11 +277,27 @@ def encode_task(model, name, inputs, batch_size, prompt=None, images=False):
         vector_path = task_dir / f"{batch_index:04d}.npy"
         timing_path = task_dir / f"{batch_index:04d}.json"
         if vector_path.is_file() and timing_path.is_file():
-            output = np.load(vector_path)
-            timing = json.loads(timing_path.read_text())
-            if output.shape == (len(batch), 768):
+            try:
+                output = np.load(vector_path, allow_pickle=False)
+                timing = json.loads(timing_path.read_text())
+                seconds = float(timing["seconds"])
+            except (EOFError, KeyError, OSError, TypeError, ValueError):
+                output = None
+                timing = None
+                seconds = float("nan")
+            if (
+                output is not None
+                and output.shape == (len(batch), 768)
+                and np.issubdtype(output.dtype, np.floating)
+                and np.isfinite(output).all()
+                and isinstance(timing, dict)
+                and timing.get("run_id") == run_info["run_id"]
+                and timing.get("items") == len(batch)
+                and np.isfinite(seconds)
+                and seconds >= 0
+            ):
                 vectors.append(output)
-                durations.append(float(timing["seconds"]))
+                durations.append(seconds)
                 print(f"{name} batch {batch_index + 1}/{batch_count} cached", flush=True)
                 continue
         options = {
@@ -246,7 +320,12 @@ def encode_task(model, name, inputs, batch_size, prompt=None, images=False):
         with temporary.open("wb") as stream:
             np.save(stream, output)
         temporary.replace(vector_path)
-        atomic_json(timing_path, {"items": len(batch), "seconds": seconds})
+        atomic_json(timing_path, {
+            "run_id": run_info["run_id"],
+            "completed_at": utc_now(),
+            "items": len(batch),
+            "seconds": seconds,
+        })
         vectors.append(output)
         durations.append(seconds)
         print(f"{name} batch {batch_index + 1}/{batch_count} done in {seconds:.2f}s", flush=True)
@@ -263,9 +342,14 @@ def encode_task(model, name, inputs, batch_size, prompt=None, images=False):
     }
 
 
-def part_summary(part, parameter_count, load_seconds, runtime, timings):
+def part_summary(part, parameter_count, load_seconds, runtime, timings, run_info, started_at):
     runtime["peak_rss_kib"] = peak_rss_kib()
     atomic_json(PROGRESS / f"{part}-summary.json", {
+        "part": part,
+        "run_id": run_info["run_id"],
+        "started_at": started_at,
+        "completed_at": utc_now(),
+        "command": ["python", Path(__file__).name, "--part", part],
         "loaded_parameters_text_and_vision": parameter_count,
         "load_seconds": load_seconds,
         "runtime": runtime,
@@ -273,7 +357,7 @@ def part_summary(part, parameter_count, load_seconds, runtime, timings):
     })
 
 
-def cached_task(name, count, batch_size):
+def cached_task(name, count, batch_size, run_info):
     task_dir = PROGRESS / name
     arrays = []
     durations = []
@@ -283,8 +367,20 @@ def cached_task(name, count, batch_size):
         timing_path = task_dir / f"{batch_index:04d}.json"
         if not vector_path.is_file() or not timing_path.is_file():
             raise FileNotFoundError(f"Missing {name} batch {batch_index}; run --part {name}")
-        arrays.append(np.load(vector_path))
-        durations.append(float(json.loads(timing_path.read_text())["seconds"]))
+        output = np.load(vector_path, allow_pickle=False)
+        expected_shape = (min(batch_size, count - batch_index * batch_size), 768)
+        if output.shape != expected_shape:
+            raise ValueError(f"Invalid cached {name} batch {batch_index}: expected shape {expected_shape}, got {output.shape}")
+        if not np.issubdtype(output.dtype, np.floating) or not np.isfinite(output).all():
+            raise ValueError(f"Invalid non-finite or non-numeric cached {name} batch {batch_index}")
+        timing = json.loads(timing_path.read_text())
+        if not isinstance(timing, dict) or timing.get("run_id") != run_info["run_id"] or timing.get("items") != expected_shape[0]:
+            raise ValueError(f"Cached {name} batch {batch_index} belongs to a different or incomplete run")
+        seconds = float(timing["seconds"])
+        if not np.isfinite(seconds) or seconds < 0:
+            raise ValueError(f"Invalid elapsed time for cached {name} batch {batch_index}")
+        arrays.append(output)
+        durations.append(seconds)
     embeddings = np.concatenate(arrays)
     return embeddings, {
         "items": count,
@@ -298,7 +394,16 @@ def cached_task(name, count, batch_size):
 
 
 def retrieval_metrics(scores, candidate_ids, query_ids):
+    scores = np.asarray(scores)
     candidate_ids = np.asarray(candidate_ids)
+    query_ids = np.asarray(query_ids)
+    expected_shape = (len(query_ids), len(candidate_ids))
+    if scores.ndim != 2 or scores.shape != expected_shape:
+        raise ValueError(f"Retrieval score matrix must have shape {expected_shape}, got {scores.shape}")
+    if candidate_ids.ndim != 1 or query_ids.ndim != 1:
+        raise ValueError("Query and candidate identifiers must be one-dimensional")
+    if not np.isfinite(scores).all():
+        raise ValueError("Retrieval scores contain non-finite values")
     order = np.argsort(-scores, axis=1)
     ranks = []
     for index, query_id in enumerate(query_ids):
@@ -318,8 +423,9 @@ def retrieval_metrics(scores, candidate_ids, query_ids):
     }
 
 
-def run_part(part, products):
-    checkpoint = get_checkpoint_info()
+def run_part(part, products, run_info):
+    started_at = utc_now()
+    checkpoint = get_checkpoint_info(run_info)
     model, parameter_count, load_seconds, runtime = load_model()
     timings = {}
     if part in ("main", "alt"):
@@ -330,27 +436,28 @@ def run_part(part, products):
             f"image_{part}",
             [{"image": str(path)} for path in paths],
             IMAGE_BATCH,
+            run_info,
             images=True,
         )
     elif part == "texts":
         titles = [product["title"] for product in products]
-        _, timings["raw_titles"] = encode_task(model, "raw_titles", titles, TEXT_BATCH)
+        _, timings["raw_titles"] = encode_task(model, "raw_titles", titles, TEXT_BATCH, run_info)
         _, timings["searchquery_titles"] = encode_task(
-            model, "searchquery_titles", titles, TEXT_BATCH, prompt=SEARCH_PREFIX
+            model, "searchquery_titles", titles, TEXT_BATCH, run_info, prompt=SEARCH_PREFIX
         )
     else:
         raise ValueError(part)
-    part_summary(part, parameter_count, load_seconds, runtime, timings)
+    part_summary(part, parameter_count, load_seconds, runtime, timings, run_info, started_at)
     print(json.dumps({"part": part, "checkpoint": checkpoint, "load_seconds": load_seconds, "timings": timings, "runtime": runtime}, indent=2), flush=True)
 
 
-def assemble(products):
+def assemble(products, run_info):
     product_ids = [product["item_id"] for product in products]
     manifest_sha256 = sha256(MANIFEST)
-    main_embeddings, main_timing = cached_task("image_main", len(products), IMAGE_BATCH)
-    alt_embeddings, alt_timing = cached_task("image_alt", len(products), IMAGE_BATCH)
-    raw_text_embeddings, raw_text_timing = cached_task("raw_titles", len(products), TEXT_BATCH)
-    query_text_embeddings, query_text_timing = cached_task("searchquery_titles", len(products), TEXT_BATCH)
+    main_embeddings, main_timing = cached_task("image_main", len(products), IMAGE_BATCH, run_info)
+    alt_embeddings, alt_timing = cached_task("image_alt", len(products), IMAGE_BATCH, run_info)
+    raw_text_embeddings, raw_text_timing = cached_task("raw_titles", len(products), TEXT_BATCH, run_info)
+    query_text_embeddings, query_text_timing = cached_task("searchquery_titles", len(products), TEXT_BATCH, run_info)
     image_embeddings = np.concatenate([main_embeddings, alt_embeddings])
     all_image_ids = product_ids + product_ids
     retrieval = {
@@ -359,14 +466,21 @@ def assemble(products):
         "main_image_to_300_alternate_images": retrieval_metrics(main_embeddings @ alt_embeddings.T, product_ids, product_ids),
     }
     summaries = [json.loads((PROGRESS / f"{part}-summary.json").read_text()) for part in ("main", "alt", "texts")]
-    runtime = summaries[0]["runtime"]
+    if any(summary.get("run_id") != run_info["run_id"] for summary in summaries):
+        raise ValueError("Progress summaries do not belong to the active evaluation run")
+    runtime = dict(summaries[0]["runtime"])
     runtime["peak_rss_kib_by_part"] = {part: summary["runtime"]["peak_rss_kib"] for part, summary in zip(("main", "alt", "texts"), summaries)}
     runtime["peak_rss_kib"] = max(runtime["peak_rss_kib_by_part"].values())
     runtime["model_load_seconds_by_part"] = {part: summary["load_seconds"] for part, summary in zip(("main", "alt", "texts"), summaries)}
     checkpoint = json.loads((PROGRESS / "checkpoint.json").read_text())
+    if checkpoint.get("run_id") != run_info["run_id"]:
+        raise ValueError("Checkpoint metadata does not belong to the active evaluation run")
     raw_ranks = retrieval["raw_title_to_all_600_images"]["first_relevant_ranks"]
     query_ranks = retrieval["searchquery_title_to_all_600_images"]["first_relevant_ranks"]
     image_ranks = retrieval["main_image_to_300_alternate_images"]["first_relevant_ranks"]
+    if run_info["completed_at"] is None:
+        run_info["completed_at"] = utc_now()
+        atomic_json(RUN_INFO_PATH, run_info)
     result = {
         "model": MODEL_ID,
         "revision": REVISION,
@@ -376,6 +490,22 @@ def assemble(products):
         "loaded_parameters_text_and_vision": summaries[0]["loaded_parameters_text_and_vision"],
         "output_dimensions": int(image_embeddings.shape[-1]),
         "checkpoint": checkpoint,
+        "evaluation": {
+            "run_id": run_info["run_id"],
+            "started_at": run_info["started_at"],
+            "completed_at": run_info["completed_at"],
+            "assembled_at": utc_now(),
+            "configuration": run_info["configuration"],
+            "part_runs": {
+                summary["part"]: {
+                    "started_at": summary["started_at"],
+                    "completed_at": summary["completed_at"],
+                    "command": summary["command"],
+                    "runtime": summary["runtime"],
+                }
+                for summary in summaries
+            },
+        },
         "runtime": runtime,
         "dataset": {
             "name": "Amazon Berkeley Objects validation-target proxy",
@@ -411,9 +541,10 @@ def assemble(products):
             for index in range(len(products))
         ],
     }
-    OUTPUT.write_text(json.dumps(result, indent=2) + "\n")
+    output = ROOT / f"embeddinggemma2-abo-results-{run_info['run_id']}.json"
+    atomic_json(output, result)
     print(json.dumps({key: result[key] for key in ("checkpoint", "runtime", "embedding_timing", "retrieval")}, indent=2), flush=True)
-    print("RESULT_PATH", OUTPUT, flush=True)
+    print("RESULT_PATH", output, flush=True)
 
 
 parser = argparse.ArgumentParser()
@@ -422,7 +553,8 @@ args = parser.parse_args()
 products = load_products()
 if any(not path.is_file() for kind in ("main", "other") for path in image_paths(products, kind)):
     raise FileNotFoundError("The fixed ABO sample is missing one or more downloaded images")
+run_info = load_run_info(allow_completed=args.part == "assemble")
 if args.part == "assemble":
-    assemble(products)
+    assemble(products, run_info)
 else:
-    run_part(args.part, products)
+    run_part(args.part, products, run_info)

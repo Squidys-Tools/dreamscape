@@ -7,28 +7,33 @@ The virtual environment, uv cache, Hugging Face model cache, sample images, prog
 are kept under .local-evaluations/embeddinggemma2-abo in the repository root.
 .PARAMETER Part
 Run just one resumable part. Without this parameter, all four parts run in order.
+.PARAMETER NewRun
+Discard the current batch progress and start a new run, preserving prior result JSON files.
 .EXAMPLE
 .\scripts\run_embeddinggemma2_abo.ps1
 .EXAMPLE
 .\scripts\run_embeddinggemma2_abo.ps1 -Part main
+.EXAMPLE
+.\scripts\run_embeddinggemma2_abo.ps1 -NewRun
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('main', 'alt', 'texts', 'assemble')]
-    [string]$Part
+    [string]$Part,
+    [switch]$NewRun
 )
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $PackageRoot = Join-Path $PSScriptRoot 'embeddinggemma2-abo'
 $WorkRoot = Join-Path $ProjectRoot '.local-evaluations\embeddinggemma2-abo'
 $SampleRoot = Join-Path $WorkRoot 'abo-sample'
+$ProgressRoot = Join-Path $SampleRoot '.embeddinggemma2-progress'
 $Venv = Join-Path $WorkRoot '.venv'
 $Python = Join-Path $Venv 'Scripts\python.exe'
 $Runner = Join-Path $PackageRoot 'run_embeddinggemma2_abo.py'
 $SourceManifest = Join-Path $PackageRoot 'manifest.jsonl'
 $Manifest = Join-Path $SampleRoot 'manifest.jsonl'
 $ExpectedManifestHash = 'a61f64fb245a23440b2a00c3eabac5cda7a493571b64a78b4629ba85146b91bd'
-$Result = Join-Path $SampleRoot 'embeddinggemma2-abo-results-2026-10-13.json'
 
 foreach ($RequiredCommand in @('uv')) {
     if (-not (Get-Command $RequiredCommand -ErrorAction SilentlyContinue)) {
@@ -36,7 +41,7 @@ foreach ($RequiredCommand in @('uv')) {
     }
 }
 
-$EnvironmentNames = @('UV_CACHE_DIR', 'UV_PYTHON_DOWNLOADS', 'HF_HOME', 'ABO_SAMPLE_ROOT')
+$EnvironmentNames = @('UV_CACHE_DIR', 'UV_PYTHON_DOWNLOADS', 'HF_HOME', 'ABO_SAMPLE_ROOT', 'ABO_EMBEDDINGGEMMA_PROGRESS')
 $PreviousEnvironment = @{}
 foreach ($Name in $EnvironmentNames) {
     $PreviousEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
@@ -48,6 +53,7 @@ try {
     $env:UV_PYTHON_DOWNLOADS = 'never'
     $env:HF_HOME = Join-Path $WorkRoot 'huggingface'
     $env:ABO_SAMPLE_ROOT = $SampleRoot
+    $env:ABO_EMBEDDINGGEMMA_PROGRESS = $ProgressRoot
 
     $UvInstallHelp = & uv pip install --help
     if ($LASTEXITCODE -ne 0 -or -not ($UvInstallHelp | Select-String -SimpleMatch '--torch-backend')) {
@@ -84,6 +90,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'uv could not install the pinned CPU dependencies. The failure output above includes the cause.' }
     & uv pip check --python $Python
     if ($LASTEXITCODE -ne 0) { throw 'The project-local Python environment has dependency conflicts.' }
+
+    if ($NewRun -and (Test-Path -LiteralPath $ProgressRoot)) {
+        Remove-Item -LiteralPath $ProgressRoot -Recurse -Force -ErrorAction Stop
+    }
 
     $Downloader = @'
 import concurrent.futures, json, os, pathlib, time, urllib.request
@@ -127,6 +137,12 @@ print(f"Ready: {len(list(image_dir.glob('*.jpg')))} of {len(images)} images in {
     }
 
     if ($Parts -contains 'assemble') {
+        $RunInfoPath = Join-Path $ProgressRoot 'run.json'
+        if (-not (Test-Path -LiteralPath $RunInfoPath -PathType Leaf)) {
+            throw "Evaluation progress metadata is missing: $RunInfoPath"
+        }
+        $RunInfo = Get-Content -LiteralPath $RunInfoPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $Result = Join-Path $SampleRoot ("embeddinggemma2-abo-results-{0}.json" -f $RunInfo.run_id)
         if (-not (Test-Path -LiteralPath $Result -PathType Leaf)) {
             throw "The assemble step finished without producing the result file: $Result"
         }
