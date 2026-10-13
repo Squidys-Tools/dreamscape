@@ -8,3 +8,5 @@
 # wasm-pack output. Generated on every build, and rebuilding it is the whole
 # point of the browser host.
 /crates/canvas-wasm/pkg
+# Generated local model-evaluation environment, model cache, images and results.
+/.local-evaluations/embeddinggemma2-abo/
