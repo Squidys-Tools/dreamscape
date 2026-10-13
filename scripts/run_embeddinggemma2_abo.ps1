@@ -23,6 +23,10 @@ param(
     [switch]$NewRun
 )
 
+if ($NewRun -and $Part -eq 'assemble') {
+    throw '-NewRun cannot be combined with -Part assemble. Run all parts to start a new evaluation.'
+}
+
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $PackageRoot = Join-Path $PSScriptRoot 'embeddinggemma2-abo'
 $WorkRoot = Join-Path $ProjectRoot '.local-evaluations\embeddinggemma2-abo'

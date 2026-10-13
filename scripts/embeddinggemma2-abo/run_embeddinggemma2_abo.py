@@ -2,8 +2,10 @@ import argparse
 import ctypes
 import hashlib
 import json
+import math
 import os
 import platform
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,8 @@ import torch
 import transformers
 import sentence_transformers
 from huggingface_hub import snapshot_download
+import safetensors
+from safetensors import safe_open
 from sentence_transformers import SentenceTransformer
 
 MODEL_ID = "google/embeddinggemma-2"
@@ -51,11 +55,16 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def run_configuration():
+def run_configuration(products):
     return {
         "model": MODEL_ID,
         "revision": REVISION,
         "manifest_sha256": sha256(MANIFEST),
+        "image_sha256": {
+            image["image_id"]: sha256(ROOT / "images" / f"{image['image_id']}.jpg")
+            for product in products
+            for image in product["images"]
+        },
         "image_token_budget": IMAGE_TOKENS,
         "image_batch_size": IMAGE_BATCH,
         "text_batch_size": TEXT_BATCH,
@@ -65,9 +74,9 @@ def run_configuration():
     }
 
 
-def load_run_info(allow_completed=False):
+def load_run_info(products, allow_completed=False):
     PROGRESS.mkdir(parents=True, exist_ok=True)
-    configuration = run_configuration()
+    configuration = run_configuration(products)
     if RUN_INFO_PATH.is_file():
         run_info = json.loads(RUN_INFO_PATH.read_text())
         if run_info.get("configuration") != configuration:
@@ -191,7 +200,8 @@ def runtime_profile():
         "vcpus_visible": os.cpu_count(),
         "memory_total_bytes": memory_total_bytes(),
         "device": "CPU",
-        "threads": 1,
+        "threads": torch.get_num_threads(),
+        "interop_threads": torch.get_num_interop_threads(),
         "dtype": "bfloat16" if bf16_supported else "float32",
         "cpu_capability": cpu_capability,
         "bf16_cpu_supported": bf16_supported,
@@ -200,6 +210,7 @@ def runtime_profile():
         "torch": str(torch.__version__),
         "transformers": transformers.__version__,
         "sentence_transformers": sentence_transformers.__version__,
+        "safetensors": safetensors.__version__,
         "numpy": np.__version__,
     }
 
@@ -221,6 +232,11 @@ def image_paths(products, kind):
     ]
 
 
+def checkpoint_parameter_count(path):
+    with safe_open(str(path), framework="np") as checkpoint:
+        return sum(math.prod(checkpoint.get_slice(name).get_shape()) for name in checkpoint.keys())
+
+
 def get_checkpoint_info(run_info):
     PROGRESS.mkdir(parents=True, exist_ok=True)
     info_path = PROGRESS / "checkpoint.json"
@@ -238,6 +254,7 @@ def get_checkpoint_info(run_info):
         "model_file": weight_path.name,
         "model_file_bytes": weight_path.stat().st_size,
         "model_file_sha256": sha256(weight_path),
+        "full_model_parameters": checkpoint_parameter_count(weight_path),
         "cache_lookup_seconds": cache_lookup_seconds,
         "cold_download_time_measured": False,
     }
@@ -246,8 +263,6 @@ def get_checkpoint_info(run_info):
 
 
 def load_model():
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
     runtime = runtime_profile()
     dtype = torch.bfloat16 if runtime["bf16_cpu_supported"] else torch.float32
     started = time.perf_counter()
@@ -349,7 +364,7 @@ def part_summary(part, parameter_count, load_seconds, runtime, timings, run_info
         "run_id": run_info["run_id"],
         "started_at": started_at,
         "completed_at": utc_now(),
-        "command": ["python", Path(__file__).name, "--part", part],
+        "command": [sys.executable, str(Path(__file__).resolve()), "--part", part],
         "loaded_parameters_text_and_vision": parameter_count,
         "load_seconds": load_seconds,
         "runtime": runtime,
@@ -478,22 +493,20 @@ def assemble(products, run_info):
     raw_ranks = retrieval["raw_title_to_all_600_images"]["first_relevant_ranks"]
     query_ranks = retrieval["searchquery_title_to_all_600_images"]["first_relevant_ranks"]
     image_ranks = retrieval["main_image_to_300_alternate_images"]["first_relevant_ranks"]
-    if run_info["completed_at"] is None:
-        run_info["completed_at"] = utc_now()
-        atomic_json(RUN_INFO_PATH, run_info)
+    completed_at = run_info["completed_at"] or utc_now()
     result = {
         "model": MODEL_ID,
         "revision": REVISION,
         "release_date": "2026-10-06",
         "license": "Apache-2.0; Google’s model card also requires adherence to the Gemma Prohibited Use Policy",
-        "full_model_parameters": 744_371_488,
+        "full_model_parameters": checkpoint["full_model_parameters"],
         "loaded_parameters_text_and_vision": summaries[0]["loaded_parameters_text_and_vision"],
         "output_dimensions": int(image_embeddings.shape[-1]),
         "checkpoint": checkpoint,
         "evaluation": {
             "run_id": run_info["run_id"],
             "started_at": run_info["started_at"],
-            "completed_at": run_info["completed_at"],
+            "completed_at": completed_at,
             "assembled_at": utc_now(),
             "configuration": run_info["configuration"],
             "part_runs": {
@@ -543,6 +556,9 @@ def assemble(products, run_info):
     }
     output = ROOT / f"embeddinggemma2-abo-results-{run_info['run_id']}.json"
     atomic_json(output, result)
+    if run_info["completed_at"] is None:
+        run_info["completed_at"] = completed_at
+        atomic_json(RUN_INFO_PATH, run_info)
     print(json.dumps({key: result[key] for key in ("checkpoint", "runtime", "embedding_timing", "retrieval")}, indent=2), flush=True)
     print("RESULT_PATH", output, flush=True)
 
@@ -550,10 +566,12 @@ def assemble(products, run_info):
 parser = argparse.ArgumentParser()
 parser.add_argument("--part", required=True, choices=["main", "alt", "texts", "assemble"])
 args = parser.parse_args()
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 products = load_products()
 if any(not path.is_file() for kind in ("main", "other") for path in image_paths(products, kind)):
     raise FileNotFoundError("The fixed ABO sample is missing one or more downloaded images")
-run_info = load_run_info(allow_completed=args.part == "assemble")
+run_info = load_run_info(products, allow_completed=args.part == "assemble")
 if args.part == "assemble":
     assemble(products, run_info)
 else:
