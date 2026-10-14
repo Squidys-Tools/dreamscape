@@ -458,7 +458,11 @@ an average:
 | 1 | 200 | 8.212 | 6.700 | 9.800 | 316.000 | 1 | 500 | 100,000 |
 | 2 | 200 | 7.700 | 6.300 | 10.500 | 230.900 | 2 | 500 | 100,000 |
 
-Native pixel proof and timing remain pending.
+One native capture came from
+`.\scripts\bench.ps1 -Scenario text -ResultLog native-text.txt` on a Windows
+host. The rounded report showed mean 3.38 ms, p99 6.98 ms, max 213.39 ms, and
+1/200 frames over 16.67 ms, with 500 peak-visible items and 100,000 text-item
+frames. Native pixel proof remains pending.
 
 ## Not representative of production
 
@@ -466,7 +470,8 @@ Mip levels are generated on the CPU here. Production decodes once at ingest and
 reads them back from the thumbnail cache (SQU-65). Atlas residency, eviction and
 upload behaviour under pan and zoom is identical either way, and that is what
 this measures. The bundled font covers a limited Latin set. Browser timings and
-bright-pixel readback are recorded above; native GPU proof is still outstanding.
+bright-pixel readback are recorded above, as is one native timing sample; native
+GPU pixel proof is still outstanding.
 
 ## Still to do
 
@@ -497,9 +502,10 @@ bright-pixel readback are recorded above; native GPU proof is still outstanding.
   targets, and is not a synonym for either of the others. What is left is whether that is worth
   gpui's platform integration and styling, which is SQU-77's to weigh.
 - Choose between them, and record the reasoning.
-- Run the native text-only GPU pixel proof and capture the native `text`
-  scenario. Browser readback and timing are recorded above. This cloud machine
-  has no wgpu adapter, so native proof and timing are not verified here.
+- Run the native text-only GPU pixel proof with `cargo test -p canvas-gpu
+  text_rendering_changes_readback_pixels -- --ignored`. Browser readback and
+  browser/native timing are recorded above. This cloud machine has no wgpu
+  adapter, so native pixel proof is not verified here.
 - Decide atlas capacity policy, or move off the atlas. The measured number now
   exists: 74.21% of item-frames degrade at 2,048 for a 2,000-item board, rising
   to 98.22% at 32,000. The web has a smaller texture budget than the desktop, so
