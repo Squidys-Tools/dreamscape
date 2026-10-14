@@ -93,7 +93,10 @@ try {
         if ($LASTEXITCODE -ne 0 -or -not $BasePython) {
             throw 'uv could not find an already-installed Python 3.12-3.14. Install one yourself; this script will not download Python.'
         }
-        & uv venv --clear --force --python $BasePython --no-python-downloads $Venv
+        if (Test-Path -LiteralPath $Venv) {
+            Remove-Item -LiteralPath $Venv -Recurse -Force -ErrorAction Stop
+        }
+        & uv venv --python $BasePython --no-python-downloads $Venv
         if ($LASTEXITCODE -ne 0) { throw 'uv could not create the project-local virtual environment.' }
     }
 
