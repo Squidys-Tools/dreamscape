@@ -51,6 +51,10 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def sha256_manifest():
+    return hashlib.sha256(MANIFEST.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def utc_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -59,7 +63,7 @@ def run_configuration(products):
     return {
         "model": MODEL_ID,
         "revision": REVISION,
-        "manifest_sha256": sha256(MANIFEST),
+        "manifest_sha256": sha256_manifest(),
         "image_sha256": {
             image["image_id"]: sha256(ROOT / "images" / f"{image['image_id']}.jpg")
             for product in products
@@ -468,7 +472,7 @@ def run_part(part, products, run_info):
 
 def assemble(products, run_info):
     product_ids = [product["item_id"] for product in products]
-    manifest_sha256 = sha256(MANIFEST)
+    manifest_sha256 = sha256_manifest()
     main_embeddings, main_timing = cached_task("image_main", len(products), IMAGE_BATCH, run_info)
     alt_embeddings, alt_timing = cached_task("image_alt", len(products), IMAGE_BATCH, run_info)
     raw_text_embeddings, raw_text_timing = cached_task("raw_titles", len(products), TEXT_BATCH, run_info)

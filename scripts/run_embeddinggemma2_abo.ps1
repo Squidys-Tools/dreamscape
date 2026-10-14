@@ -69,11 +69,19 @@ try {
             throw "Required project input is missing: $Path"
         }
     }
-    $ActualManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $SourceManifest -ErrorAction Stop).Hash.ToLowerInvariant()
+    $ManifestContent = [System.IO.File]::ReadAllText($SourceManifest, [System.Text.Encoding]::UTF8).Replace("`r`n", "`n")
+    $ManifestBytes = [System.Text.Encoding]::UTF8.GetBytes($ManifestContent)
+    $HashAlgorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $ActualManifestHash = [System.BitConverter]::ToString($HashAlgorithm.ComputeHash($ManifestBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $HashAlgorithm.Dispose()
+    }
     if ($ActualManifestHash -ne $ExpectedManifestHash) {
         throw "Pinned manifest hash mismatch: $ActualManifestHash"
     }
-    Copy-Item -LiteralPath $SourceManifest -Destination $Manifest -Force -ErrorAction Stop
+    [System.IO.File]::WriteAllBytes($Manifest, $ManifestBytes)
 
     $NeedsVenv = -not (Test-Path -LiteralPath $Python -PathType Leaf)
     if (-not $NeedsVenv) {
