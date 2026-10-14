@@ -441,24 +441,32 @@ in the `RESULT` line reports the drawn text workload. The native runner rejects
 missing result fields; the browser runner captures the same line. Both add
 `-Scenario text` to isolate 500 text items from images. On a GPU-equipped host,
 the pixel check is `cargo test -p canvas-gpu
-text_rendering_changes_readback_pixels -- --ignored`; the browser's
-`verify_pixels` also rejects an image-free text scene with no bright pixels.
+text_rendering_changes_readback_pixels -- --ignored`. The browser calls
+`verify_pixels` before and after the measurement, and rejects an image-free text
+scene if readback contains no bright glyph pixels. A successful browser result
+therefore confirms glyph pixels were written, but not where they appeared or
+whether the compositor presented them.
 
-The scenario is wired into both runners, but its measurements are still
-unverified on this machine:
+Two browser captures came from
+`.\scripts\web-bench.ps1 -Scenario text -Measure -ResultLog wasm-text.txt` on a
+Windows host. The backend reported `BrowserWebGpu` without an adapter identity;
+the capture log reported `load before: 9% cpu`. These are separate samples, not
+an average:
 
-| Scenario | Images | Text items | Native/browser result |
-|---|---:|---:|---|
-| `text` | 0 | 500 | Not captured; GPU pixel proof pending |
+| Capture | Frames | Mean (ms) | P50 (ms) | P99 (ms) | Max (ms) | Over 16.67 ms | Peak visible | Text item frames |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 200 | 8.212 | 6.700 | 9.800 | 316.000 | 1 | 500 | 100,000 |
+| 2 | 200 | 7.700 | 6.300 | 10.500 | 230.900 | 2 | 500 | 100,000 |
+
+Native pixel proof and timing remain pending.
 
 ## Not representative of production
 
 Mip levels are generated on the CPU here. Production decodes once at ingest and
 reads them back from the thumbnail cache (SQU-65). Atlas residency, eviction and
 upload behaviour under pan and zoom is identical either way, and that is what
-this measures. The bundled font covers a limited Latin set, and no timings or
-pixel output from the new text pass have been captured on a GPU-equipped machine
-yet.
+this measures. The bundled font covers a limited Latin set. Browser timings and
+bright-pixel readback are recorded above; native GPU proof is still outstanding.
 
 ## Still to do
 
@@ -489,9 +497,9 @@ yet.
   targets, and is not a synonym for either of the others. What is left is whether that is worth
   gpui's platform integration and styling, which is SQU-77's to weigh.
 - Choose between them, and record the reasoning.
-- Run the text-only GPU pixel proof and capture the native and browser `text`
-  scenarios. The implementation is shared, but this cloud machine has no wgpu
-  adapter, so the pixel test and timings are not verified here.
+- Run the native text-only GPU pixel proof and capture the native `text`
+  scenario. Browser readback and timing are recorded above. This cloud machine
+  has no wgpu adapter, so native proof and timing are not verified here.
 - Decide atlas capacity policy, or move off the atlas. The measured number now
   exists: 74.21% of item-frames degrade at 2,048 for a 2,000-item board, rising
   to 98.22% at 32,000. The web has a smaller texture budget than the desktop, so
