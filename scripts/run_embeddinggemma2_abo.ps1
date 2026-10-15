@@ -100,7 +100,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'uv could not create the project-local virtual environment.' }
     }
 
-    $Packages = @('torch==2.14.0+cpu', 'sentence-transformers==6.1.0', 'transformers==5.19.0', 'huggingface_hub==1.33.0', 'numpy==2.5.4', 'Pillow==12.3.0')
+    $Packages = @('torch==2.14.0+cpu', 'torchvision==0.29.0+cpu', 'sentence-transformers==6.1.0', 'transformers==5.19.0', 'huggingface_hub==1.33.0', 'numpy==2.5.4', 'Pillow==12.3.0')
     & uv pip install --python $Python --torch-backend cpu @Packages
     if ($LASTEXITCODE -ne 0) { throw 'uv could not install the pinned CPU dependencies. The failure output above includes the cause.' }
     & uv pip check --python $Python

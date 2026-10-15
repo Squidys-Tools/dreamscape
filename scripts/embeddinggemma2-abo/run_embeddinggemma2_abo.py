@@ -18,6 +18,7 @@ except ImportError:
 
 import numpy as np
 import torch
+import torchvision
 import transformers
 import sentence_transformers
 from huggingface_hub import snapshot_download
@@ -206,6 +207,7 @@ def runtime_profile():
         "device": "CPU",
         "threads": torch.get_num_threads(),
         "interop_threads": torch.get_num_interop_threads(),
+        "torchvision": torchvision.__version__,
         "dtype": "bfloat16" if bf16_supported else "float32",
         "cpu_capability": cpu_capability,
         "bf16_cpu_supported": bf16_supported,
