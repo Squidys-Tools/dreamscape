@@ -143,7 +143,7 @@ Most code changes need no docs change. Agents can read the code.
 
 ## How it works
 
-Every frame, in every consumer: advance the camera, cull the grid to the viewport, pin the visible set, request a mip level for anything not already resident, upload those, encode one instanced draw call, submit.
+Every frame, in every consumer: advance the camera, cull the grid to the viewport, pin visible images, request and upload missing image mips, then draw the image batch and composite text as a stable overlay in the same render pass. Glyphs have a separate atlas, so text cannot evict image mips.
 
 A host supplies the device, the queue and a target texture view. The canvas renders into its own offscreen `Rgba8UnormSrgb` texture, and the host blits that texture inside its existing render pass, so nothing crosses the CPU. The headless harness does the same into a plain texture and additionally waits for the GPU, which is why its numbers are a ceiling.
 
@@ -152,9 +152,9 @@ Full reasoning, and the findings that shaped it, in `docs/spikes/canvas-spike.md
 ## Where code lives
 
 - `crates/canvas-core` is the item model, viewport, spatial hash, culling, LOD and the camera maths pan and zoom need. No GPU, no platform dependencies, 14 unit tests. Most of the correctness risk lives here.
-- `crates/canvas-gpu` is the wgpu renderer: fixed-slot atlas, lazy per-level allocation, eviction, one instanced draw call.
-- `crates/canvas-app` is the scene, camera, selection, search and the per-frame pipeline. Every consumer links this, so the only thing that differs between them is how the chrome is drawn.
-- `crates/canvas-harness` is the headless driver over `canvas-app` plus frame metrics. No asset files.
+- `crates/canvas-gpu` is the wgpu renderer: fixed-slot image atlas, lazy per-level allocation, eviction, one instanced image draw and a separate glyphon text atlas/overlay.
+- `crates/canvas-app` is the scene, camera, selection, search, text items and the per-frame pipeline. Every consumer links this, so the only thing that differs between them is how the chrome is drawn.
+- `crates/canvas-harness` is the headless driver over `canvas-app` plus frame metrics. Images are generated; the shared renderer bundles a subset font for text.
 - `crates/canvas-wasm` is the browser host, and the only crate that may depend on `wasm-bindgen`. It is thin on purpose: it owns a GPU context, a clock and the compositor, and nothing else. `web/` is the page, the local server and the capture endpoint; `pkg/` is generated.
 - `crates/host-iced` is an iced 0.14 host sharing one wgpu device with the canvas. It draws and its counters read healthy, but nothing on it has been confirmed against a screen; see the known-broken list.
 - `crates/probe-surface` is a throwaway raw winit plus wgpu control. Delete it once presentation works.
@@ -178,7 +178,7 @@ Recorded so nobody re-derives the failure. Tracked in Linear.
 - Complexity belongs at the adapter boundary. The renderer stays pure, hosts stay dumb.
 - Inferred types over annotations.
 - Comments explain why, not what. The existing code carries a reasoning comment wherever a choice looks odd, especially where a finding forced the design. Match that density or raise it. A comment restating the line below it is noise.
-- The whole board is one draw call, so resist adding batching logic at low item counts. It is not where the time goes.
+- The image batch is one draw call, so resist adding batching logic at low item counts. Text has its own stable overlay pass and glyph atlas.
 - A grey placeholder on screen is a bug report about the atlas, never a styling decision.
 - If a rule here fights the task in front of you, say so loudly and get a human sign-off before breaking it.
 

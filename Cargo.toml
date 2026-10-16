@@ -25,6 +25,7 @@ canvas-harness = { path = "crates/canvas-harness" }
 wgpu = "27"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+glyphon = { git = "https://github.com/grovesNL/glyphon", rev = "de4b5b8d4e52310be8df56d82a759593920acc04" }
 
 [profile.dev]
 opt-level = 1
@@ -32,4 +33,3 @@ opt-level = 1
 [profile.release]
 opt-level = 3
 lto = "thin"
-

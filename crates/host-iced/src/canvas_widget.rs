@@ -337,13 +337,14 @@ impl Primitive for CanvasPrimitive {
             let (mean, _p50, p99, max, over) = sh.metrics.percentiles(BUDGET_MS);
             eprintln!(
                 "host-iced  {w}x{h}  frames {}  mean {mean:.2}ms  p99 {p99:.2}ms  \
-                 max {max:.2}ms  over {over}/{}  peak visible {}  drawn {}  \
+                 max {max:.2}ms  over {over}/{}  peak visible {}  drawn {}  text {}  \
                  degraded {}  placeholders {}  uploads {}  evictions {}  \
                  camera {:.4} at {:.0},{:.0}",
                 sh.metrics.len(),
                 sh.metrics.len(),
                 sh.metrics.peak_visible,
                 stats.drawn,
+                stats.text_items,
                 stats.degraded,
                 stats.placeholder,
                 stats.uploads,

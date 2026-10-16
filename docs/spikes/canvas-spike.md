@@ -412,14 +412,69 @@ Pushing past this means a larger atlas, coarser rendering when many items are
 visible, or abandoning the atlas for per-item textures. SQU-65 should own that
 decision, since it is the same question as how large thumbnails are on disk.
 
+## Text has its own glyph atlas and overlay
+
+Text is a `Text` item with shared world geometry, not a label drawn by either
+host. The renderer shapes it with `cosmic-text` and draws it with `glyphon` after
+the thumbnail batch as an overlay in the same render pass. Its mask and color
+glyph atlases are separate from the fixed-slot image atlas, so glyph residency
+cannot evict a thumbnail or affect image degradation.
+
+Shaped buffers are cached by content, world-space box and font size, targeting a
+4,096-entry FIFO limit. Buffers needed by the current frame stay pinned, so a
+larger visible working set can temporarily exceed that target; older off-frame
+shapes are evicted first. A key change or eviction triggers reshaping; camera
+zoom does not invalidate shaping, and `glyphon` rasterizes and caches the new
+screen-size glyphs in its own atlas. Pan only changes placement. This keeps the
+CPU shaping work out of the common pan path without retaining every label ever
+seen on an infinite board.
+
+The browser gets a bundled subset of Lato under the accompanying OFL license:
+Basic Latin, Latin-1, and common punctuation. That is a reproducible font source,
+not a localization decision; other scripts need additional subsets and fallback
+policy. The pinned `glyphon` revision targets this repo's wgpu 27, while the
+published releases around it target wgpu 25 and 28.
+
+Adding text leaves `peak_visible` counting every visible item. The placeholder
+and degradation percentages still use image-frames only, and `text_item_frames`
+in the `RESULT` line reports the drawn text workload. The native runner rejects
+missing result fields; the browser runner captures the same line. Both add
+`-Scenario text` to isolate 500 text items from images. On a GPU-equipped host,
+the pixel check is `cargo test -p canvas-gpu
+text_rendering_changes_readback_pixels -- --ignored`. The browser calls
+`verify_pixels` before and after the measurement, and rejects an image-free text
+scene if readback contains no bright glyph pixels. A successful browser result
+therefore confirms glyph pixels were written, but not where they appeared or
+whether the compositor presented them.
+
+Two browser captures came from
+`.\scripts\web-bench.ps1 -Scenario text -Measure -ResultLog wasm-text.txt` on a
+Windows host. The backend reported `BrowserWebGpu` without an adapter identity;
+the capture log reported `load before: 9% cpu`. These are separate samples, not
+an average:
+
+| Capture | Frames | Mean (ms) | P50 (ms) | P99 (ms) | Max (ms) | Over 16.67 ms | Peak visible | Text item frames |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 200 | 8.212 | 6.700 | 9.800 | 316.000 | 1 | 500 | 100,000 |
+| 2 | 200 | 7.700 | 6.300 | 10.500 | 230.900 | 2 | 500 | 100,000 |
+
+One native capture came from
+`.\scripts\bench.ps1 -Scenario text -ResultLog native-text.txt` on a Windows
+host. The rounded report showed mean 3.38 ms, p99 6.98 ms, max 213.39 ms, and
+1/200 frames over 16.67 ms, with 500 peak-visible items and 100,000 text-item
+frames. The native pixel test also passed: 1 test, 0 failures, in 0.33 s. It
+renders at `scale=1.0` and asserts one drawn text item and at least one bright
+readback pixel; it does not assert zoomed anchor placement.
+
 ## Not representative of production
 
 Mip levels are generated on the CPU here. Production decodes once at ingest and
 reads them back from the thumbnail cache (SQU-65). Atlas residency, eviction and
 upload behaviour under pan and zoom is identical either way, and that is what
-this measures. Text is not drawn on the canvas yet; SQU-60 requires text and
-strokes composited in a stable pass, and `cosmic-text` plus `glyphon` is the
-intended stack.
+this measures. The bundled font covers a limited Latin set. Browser timings and
+bright-pixel readback are recorded above, as is one native timing sample. The
+native readback test confirms text pixels at `scale=1.0`; it does not test
+position-sensitive zoom behavior.
 
 ## Still to do
 
@@ -450,9 +505,6 @@ intended stack.
   targets, and is not a synonym for either of the others. What is left is whether that is worth
   gpui's platform integration and styling, which is SQU-77's to weigh.
 - Choose between them, and record the reasoning.
-- Canvas text via `cosmic-text` + `glyphon`. Anything drawn in the renderer is
-  shared between desktop and web, and the chrome is not, so this is the
-  highest-leverage piece of the renderer rather than a later polish item.
 - Decide atlas capacity policy, or move off the atlas. The measured number now
   exists: 74.21% of item-frames degrade at 2,048 for a 2,000-item board, rising
   to 98.22% at 32,000. The web has a smaller texture budget than the desktop, so
@@ -644,4 +696,3 @@ sysroot has no wasm32 std, and native builds used 1.98 while the repo documents 
 1.92 floor. Prepending the rustup toolchain's `bin` fixes it. A fresh clone on a
 machine with only rustup is unaffected, which is why this is a note rather than a
 committed workaround.
-

@@ -120,8 +120,7 @@ pub struct CanvasHost {
 
 #[wasm_bindgen]
 impl CanvasHost {
-    /// Build a device from a canvas element and draw one frame of `items`
-    /// distinct images.
+    /// Build a device from a canvas element and draw a scene of images and text.
     ///
     /// `backend` is `"auto"`, `"webgpu"` or `"webgl"`. Forcing a backend is how
     /// the fallback gets tested: the same seam, the same renderer, one different
@@ -136,6 +135,7 @@ impl CanvasHost {
         canvas: HtmlCanvasElement,
         items: u32,
         textures: u32,
+        text_items: u32,
         atlas: u32,
         extent: f32,
         pan: f32,
@@ -232,6 +232,7 @@ impl CanvasHost {
         let cfg = Config {
             items,
             textures,
+            text_items,
             atlas: AtlasConfig {
                 size: atlas,
                 ..Default::default()
@@ -463,12 +464,16 @@ impl CanvasHost {
         // One borrow, destructured. Two `borrow_mut` calls on the same cell, or
         // a borrow held while the other is taken, would panic at runtime rather
         // than fail to compile.
-        let stats = {
+        let (stats, verify_text_pixels) = {
             let mut inner = self.inner.borrow_mut();
+            let verify_text_pixels = inner.app.cfg.items == 0 && inner.app.cfg.text_items > 0;
             let Inner {
                 canvas, app, size, ..
             } = &mut *inner;
-            app.draw_frame(canvas, &self.device, &self.queue, &view, *size)
+            (
+                app.draw_frame(canvas, &self.device, &self.queue, &view, *size),
+                verify_text_pixels,
+            )
         };
         self.gpu_idle().await?;
 
@@ -513,6 +518,22 @@ impl CanvasHost {
 
         let mapped = map_read(&staging, 0..(stride * h as usize) as u64).await?;
         let data = &mapped[..];
+        let text_pixels = if verify_text_pixels {
+            (0..h as usize)
+                .flat_map(|y| {
+                    let row = y * stride;
+                    (0..w as usize).map(move |x| &data[row + x * 4..row + x * 4 + 3])
+                })
+                .filter(|pixel| pixel[0] > 220 && pixel[1] > 220 && pixel[2] > 220)
+                .count()
+        } else {
+            0
+        };
+        if verify_text_pixels && text_pixels == 0 {
+            return Err(JsValue::from_str(
+                "text items produced no bright pixels in the GPU readback",
+            ));
+        }
 
         // Sampled on a prime stride rather than every pixel: a 2560x1440 readback
         // is 14MB and a full histogram of it buys nothing over a hundred thousand
@@ -584,12 +605,18 @@ impl CanvasHost {
         }
         let byte_of = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
         let expect = [byte_of(clear[0]), byte_of(clear[1]), byte_of(clear[2])];
+        let text_pixel_evidence = if verify_text_pixels {
+            format!("text_pixels={text_pixels}")
+        } else {
+            "text_pixels=not-isolated".into()
+        };
 
         Ok(format!(
-            "verify {w}x{h} format={format:?} drawn={} visible={} sampled={sampled} \
+            "verify {w}x{h} format={format:?} drawn={} visible={} text_drawn={} {text_pixel_evidence} sampled={sampled} \
              distinct={} expect_clear={} peak_luma={peak} luma_hist={:?} top=[{}]",
             stats.drawn,
             stats.visible,
+            stats.text_items,
             top.len(),
             hex(expect),
             luma_hist,
