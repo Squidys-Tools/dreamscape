@@ -287,10 +287,63 @@ def load_model():
     return model, parameter_count, load_seconds, runtime
 
 
-def encode_task(model, name, inputs, batch_size, run_info, prompt=None, images=False):
+def timing_summary(batch_timings, items, batch_size, batch_count):
+    sessions = {}
+    for timing in batch_timings:
+        session_id = timing["session_id"]
+        session = sessions.setdefault(session_id, {
+            "session_id": session_id,
+            "started_at": timing["session_started_at"],
+            "last_batch_completed_at": timing["completed_at"],
+            "items": 0,
+            "batch_count": 0,
+            "seconds": [],
+        })
+        if session["started_at"] != timing["session_started_at"]:
+            raise ValueError(f"Cached timings disagree about session {session_id}")
+        session["last_batch_completed_at"] = max(session["last_batch_completed_at"], timing["completed_at"])
+        session["items"] += timing["items"]
+        session["batch_count"] += 1
+        session["seconds"].append(float(timing["seconds"]))
+    timing_sessions = []
+    for session in sessions.values():
+        seconds = session.pop("seconds")
+        session["seconds_total"] = float(sum(seconds))
+        session["items_per_second"] = session["items"] / session["seconds_total"]
+        session["mean_batch_seconds"] = float(np.mean(seconds))
+        session["p95_batch_seconds"] = float(np.quantile(seconds, 0.95))
+        timing_sessions.append(session)
+    if sum(session["items"] for session in timing_sessions) != items or sum(session["batch_count"] for session in timing_sessions) != batch_count:
+        raise ValueError("Cached timing records do not cover all completed batches")
+    summary = {
+        "items": items,
+        "batch_size": batch_size,
+        "batch_count": batch_count,
+        "session_count": len(timing_sessions),
+        "aggregate_status": "single_session" if len(timing_sessions) == 1 else "omitted_across_sessions",
+        "timing_sessions": timing_sessions,
+    }
+    if len(timing_sessions) == 1:
+        summary.update({key: timing_sessions[0][key] for key in (
+            "seconds_total",
+            "items_per_second",
+            "mean_batch_seconds",
+            "p95_batch_seconds",
+        )})
+    else:
+        summary.update({
+            "seconds_total": None,
+            "items_per_second": None,
+            "mean_batch_seconds": None,
+            "p95_batch_seconds": None,
+        })
+    return summary
+
+
+def encode_task(model, name, inputs, batch_size, run_info, session, prompt=None, images=False):
     task_dir = PROGRESS / name
     task_dir.mkdir(parents=True, exist_ok=True)
-    durations = []
+    batch_timings = []
     vectors = []
     batch_count = (len(inputs) + batch_size - 1) // batch_size
     for batch_index, start in enumerate(range(0, len(inputs), batch_size)):
@@ -314,11 +367,16 @@ def encode_task(model, name, inputs, batch_size, run_info, prompt=None, images=F
                 and isinstance(timing, dict)
                 and timing.get("run_id") == run_info["run_id"]
                 and timing.get("items") == len(batch)
+                and isinstance(timing.get("session_id"), str)
+                and bool(timing.get("session_id"))
+                and isinstance(timing.get("session_started_at"), str)
+                and bool(timing.get("session_started_at"))
+                and isinstance(timing.get("completed_at"), str)
                 and np.isfinite(seconds)
                 and seconds >= 0
             ):
                 vectors.append(output)
-                durations.append(seconds)
+                batch_timings.append(timing)
                 print(f"{name} batch {batch_index + 1}/{batch_count} cached", flush=True)
                 continue
         options = {
@@ -341,34 +399,29 @@ def encode_task(model, name, inputs, batch_size, run_info, prompt=None, images=F
         with temporary.open("wb") as stream:
             np.save(stream, output)
         temporary.replace(vector_path)
-        atomic_json(timing_path, {
+        timing = {
             "run_id": run_info["run_id"],
+            "session_id": session["session_id"],
+            "session_started_at": session["started_at"],
             "completed_at": utc_now(),
             "items": len(batch),
             "seconds": seconds,
-        })
+        }
+        atomic_json(timing_path, timing)
         vectors.append(output)
-        durations.append(seconds)
+        batch_timings.append(timing)
         print(f"{name} batch {batch_index + 1}/{batch_count} done in {seconds:.2f}s", flush=True)
     combined = np.concatenate(vectors)
-    total_seconds = float(sum(durations))
-    return combined, {
-        "items": len(inputs),
-        "batch_size": batch_size,
-        "batch_count": batch_count,
-        "seconds_total": total_seconds,
-        "items_per_second": len(inputs) / total_seconds,
-        "mean_batch_seconds": float(np.mean(durations)),
-        "p95_batch_seconds": float(np.quantile(durations, 0.95)),
-    }
+    return combined, timing_summary(batch_timings, len(inputs), batch_size, batch_count)
 
 
-def part_summary(part, parameter_count, load_seconds, runtime, timings, run_info, started_at):
+def part_summary(part, parameter_count, load_seconds, runtime, timings, run_info, session):
     runtime["peak_rss_kib"] = peak_rss_kib()
     atomic_json(PROGRESS / f"{part}-summary.json", {
         "part": part,
         "run_id": run_info["run_id"],
-        "started_at": started_at,
+        "session_id": session["session_id"],
+        "started_at": session["started_at"],
         "completed_at": utc_now(),
         "command": [sys.executable, str(Path(__file__).resolve()), "--part", part],
         "loaded_parameters_text_and_vision": parameter_count,
@@ -381,7 +434,7 @@ def part_summary(part, parameter_count, load_seconds, runtime, timings, run_info
 def cached_task(name, count, batch_size, run_info):
     task_dir = PROGRESS / name
     arrays = []
-    durations = []
+    batch_timings = []
     batch_count = (count + batch_size - 1) // batch_size
     for batch_index in range(batch_count):
         vector_path = task_dir / f"{batch_index:04d}.npy"
@@ -395,23 +448,25 @@ def cached_task(name, count, batch_size, run_info):
         if not np.issubdtype(output.dtype, np.floating) or not np.isfinite(output).all():
             raise ValueError(f"Invalid non-finite or non-numeric cached {name} batch {batch_index}")
         timing = json.loads(timing_path.read_text())
-        if not isinstance(timing, dict) or timing.get("run_id") != run_info["run_id"] or timing.get("items") != expected_shape[0]:
+        if (
+            not isinstance(timing, dict)
+            or timing.get("run_id") != run_info["run_id"]
+            or timing.get("items") != expected_shape[0]
+            or not isinstance(timing.get("session_id"), str)
+            or not timing.get("session_id")
+            or not isinstance(timing.get("session_started_at"), str)
+            or not timing.get("session_started_at")
+            or not isinstance(timing.get("completed_at"), str)
+            or not timing.get("completed_at")
+        ):
             raise ValueError(f"Cached {name} batch {batch_index} belongs to a different or incomplete run")
         seconds = float(timing["seconds"])
         if not np.isfinite(seconds) or seconds < 0:
             raise ValueError(f"Invalid elapsed time for cached {name} batch {batch_index}")
         arrays.append(output)
-        durations.append(seconds)
+        batch_timings.append(timing)
     embeddings = np.concatenate(arrays)
-    return embeddings, {
-        "items": count,
-        "batch_size": batch_size,
-        "batch_count": batch_count,
-        "seconds_total": float(sum(durations)),
-        "items_per_second": count / sum(durations),
-        "mean_batch_seconds": float(np.mean(durations)),
-        "p95_batch_seconds": float(np.quantile(durations, 0.95)),
-    }
+    return embeddings, timing_summary(batch_timings, count, batch_size, batch_count)
 
 
 def retrieval_metrics(scores, candidate_ids, query_ids):
@@ -446,6 +501,7 @@ def retrieval_metrics(scores, candidate_ids, query_ids):
 
 def run_part(part, products, run_info):
     started_at = utc_now()
+    session = {"session_id": uuid4().hex, "started_at": started_at}
     checkpoint = get_checkpoint_info(run_info)
     model, parameter_count, load_seconds, runtime = load_model()
     timings = {}
@@ -458,18 +514,19 @@ def run_part(part, products, run_info):
             [{"image": str(path)} for path in paths],
             IMAGE_BATCH,
             run_info,
+            session,
             images=True,
         )
     elif part == "texts":
         titles = [product["title"] for product in products]
-        _, timings["raw_titles"] = encode_task(model, "raw_titles", titles, TEXT_BATCH, run_info)
+        _, timings["raw_titles"] = encode_task(model, "raw_titles", titles, TEXT_BATCH, run_info, session)
         _, timings["searchquery_titles"] = encode_task(
-            model, "searchquery_titles", titles, TEXT_BATCH, run_info, prompt=SEARCH_PREFIX
+            model, "searchquery_titles", titles, TEXT_BATCH, run_info, session, prompt=SEARCH_PREFIX
         )
     else:
         raise ValueError(part)
-    part_summary(part, parameter_count, load_seconds, runtime, timings, run_info, started_at)
-    print(json.dumps({"part": part, "checkpoint": checkpoint, "load_seconds": load_seconds, "timings": timings, "runtime": runtime}, indent=2), flush=True)
+    part_summary(part, parameter_count, load_seconds, runtime, timings, run_info, session)
+    print(json.dumps({"part": part, "session_id": session["session_id"], "checkpoint": checkpoint, "load_seconds": load_seconds, "timings": timings, "runtime": runtime}, indent=2), flush=True)
 
 
 def assemble(products, run_info):
